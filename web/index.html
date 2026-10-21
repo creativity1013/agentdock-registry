@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentDock · 能力市场</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f8cff'/%3E%3Cpath d='M16 6l8 5v10l-8 5-8-5V11z' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">⬢</span>
+        <div>
+          <h1>AgentDock</h1>
+          <p class="tagline">跨 harness 的 skill / agent / plugin 能力市场与治理</p>
+        </div>
+      </div>
+      <div class="auth-slot" id="auth-slot">
+        <input id="token-input" type="password" placeholder="粘贴令牌后登录（publisher / reviewer / admin）" autocomplete="off" spellcheck="false" />
+        <button id="login-btn" class="btn btn-primary" type="button">登录</button>
+        <button id="logout-btn" class="btn hidden" type="button">退出</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs" aria-label="主导航">
+      <button class="tab active" data-view="market" type="button">市场</button>
+      <button class="tab" data-view="review" type="button">待审核 <span class="badge hidden" id="review-badge">0</span></button>
+      <button class="tab" data-view="audit" type="button">审计</button>
+      <button class="tab" data-view="tokens" type="button">令牌</button>
+    </nav>
+
+    <main id="main" class="main"></main>
+
+    <div class="modal hidden" id="modal">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-label="详情">
+        <button class="modal-close" id="modal-close" type="button" aria-label="关闭">✕</button>
+        <div id="modal-body"></div>
+      </div>
+    </div>
+
+    <div class="toast hidden" id="toast" role="status"></div>
+
+    <footer class="footer">
+      AgentDock MVP · 本地优先 · 能力包版本不可变 · 发布需审核 · 操作留痕
+    </footer>
+
+    <input type="file" id="publish-file" accept="application/json,.json" hidden />
+    <script src="/app.js"></script>
+  </body>
+</html>

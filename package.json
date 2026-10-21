@@ -1,0 +1,29 @@
+{
+  "name": "agentdock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentDock — 跨 harness 的 skill / agent / plugin 能力市场与治理平台（MVP）",
+  "bin": {
+    "agentdock": "./cli/agentdock.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test",
+    "smoke": "node scripts/smoke.mjs",
+    "examples:publish": "node scripts/publish-examples.mjs"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "keywords": [
+    "agent",
+    "skills",
+    "plugins",
+    "registry",
+    "marketplace",
+    "governance"
+  ],
+  "license": "MIT"
+}

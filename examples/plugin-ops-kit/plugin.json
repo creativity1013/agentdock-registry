@@ -1,0 +1,7 @@
+{
+  "name": "ops-kit",
+  "version": "0.1.0",
+  "description": "运维值班工具集：故障响应清单、发布前检查表、事故复盘模板。",
+  "tags": ["ops", "on-call", "runbook"],
+  "skills": ["skills/incident-checklist", "skills/release-checklist"]
+}
