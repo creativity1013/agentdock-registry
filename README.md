@@ -24,6 +24,7 @@ AgentDock 不做 runtime、也不自研能力格式，只做生态里最缺的�
 - 不可篡改：版本一旦发布不可覆盖，内容哈希可校验
 - 可落地：一条命令安装到 DSH、Claude Code、Codex 或任意目录
 - 可追溯：谁发布、谁审核、谁安装、装到哪，全部写审计日志
+- 市场体验：Web 界面分页浏览 + 服务端搜索、markdown 安全渲染、待审核版本的 diff 视图（文件级 + 逐行差异）
 
 ## 快速开始
 
@@ -239,12 +240,13 @@ my-plugin/
 | GET | `/me` | 登录 | 当前令牌身份 |
 | GET | `/targets` | 公开 | 可用安装目标 |
 | POST | `/verify` | publisher | 校验/扫描能力包，不入库 |
-| GET | `/packages?status=&kind=` | 公开（pending 需审核权限） | 市场列表 |
+| GET | `/packages?q=&kind=&status=&page=&pageSize=` | 公开（pending 需审核权限） | 市场列表（分页，`pageSize` 默认 24、最大 100） |
 | POST | `/packages` | publisher | 发布能力包 |
 | GET | `/packages/:kind/:name` | 公开 | 能力详情（含版本、扫描摘要） |
 | GET | `/packages/:kind/:name/versions/:version` | 公开（pending 需审核权限） | 版本详情 |
 | GET | `/packages/:kind/:name/versions/:version/bundle` | 公开 | 下载完整内容 |
 | GET | `/packages/:kind/:name/versions/:version/files?path=` | 公开 | 预览单个文件 |
+| GET | `/packages/:kind/:name/diff?to=&from=` | 公开（pending 需审核权限） | 版本差异（行级 diff；`from` 缺省为上一个已发布版本） |
 | POST | `/packages/:kind/:name/versions/:version/install-event` | 登录 | 登记安装事件 |
 | POST | `/install` | publisher | 安装到目标目录（服务端权限内） |
 | GET | `/review/queue` | reviewer | 待审核队列 |
@@ -349,6 +351,7 @@ agentdock/
 │   ├── scan.mjs             # 安全扫描规则引擎
 │   ├── store.mjs            # 版本库（JSON 元数据 + 文件落盘 + 审核状态机）
 │   ├── targets.mjs          # 安装目标解析与落盘计划
+│   ├── diff.mjs             # 行级/文件级 diff（LCS + 规模上限降级）
 │   ├── dsh-preset.mjs       # agent 包 → DSH agent-preset 片段（tools 映射、profile 合并）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
@@ -360,7 +363,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（45 个用例）
+├── tests/                   # node:test 测试（53 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -379,7 +382,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - **零依赖**：只用 Node 标准库（`node:http`、`node:test`、`fetch`），离线环境可直接跑；代价是 YAML 解析器、路由等需要自己维护子集实现。
 - **JSON bundle 而非 multipart/tar/zip**：上传/下载都是普通 JSON，方便 CLI、CI、脚本复用；代价是大包体积略增。
 - **文件系统存储而非数据库**：元数据 `db.json` + 内容按版本落盘，便于备份/审查/手工检查；代价是全量索引常驻内存（适合几千个包规模）。
-- **静态市场前端**：原生 JS，无构建步骤；代价是复杂交互（markdown 渲染、diff）后续再补。
+- **静态市场前端**：原生 JS，无构建步骤；markdown 渲染与 diff 视图都是轻量子集实现（渲染只创建文本节点防 XSS，diff 用 LCS 并对超大输入降级），代价是语法支持有限（不支持表格/脚注等扩展）。
 
 ## 安全模型与已知限制
 
@@ -387,12 +390,13 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip。
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
 - 扫描是**启发式规则**，不是沙箱：绕过规则注入的能力包仍可能危险，审核环节不可省。
-- 当前无分页搜索、无 SSO/多租户、无签名验证（内容哈希仅用于一致性校验）。
+- 市场已支持分页与服务端搜索；当前无 SSO/多租户、无内容签名验证（内容哈希仅用于一致性校验）。
+- diff 视图只做行级对比：二进制文件仅标记变化，超大文件（>512KB 或 >2000 行）退化为整文件标记。
 
 ## Roadmap
 
-- [ ] 市场分页、全文搜索、标签筛选
-- [ ] markdown 安全渲染与审核 diff 视图
+- [x] 市场分页、服务端搜索与类型筛选
+- [x] markdown 安全渲染与审核 diff 视图
 - [ ] 内容签名（ed25519）与 `verify --signature`
 - [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
 - [ ] 与外部 registry（GitHub / skills.sh / MCP registry）双向同步

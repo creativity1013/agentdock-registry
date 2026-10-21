@@ -207,9 +207,7 @@ export function createStore(config, { audit } = {}) {
     return versionDoc;
   }
 
-  /** 下载包内容（用于 CLI 安装） */
-  function bundleContent(kind, name, version) {
-    const versionDoc = requirePublished(kind, name, version);
+  function bundleFromVersion(kind, name, versionDoc) {
     const base = filesDir(kind, name, versionDoc.version);
     const files = versionDoc.files.map((file) => {
       const abs = path.join(base, file.path);
@@ -234,6 +232,18 @@ export function createStore(config, { audit } = {}) {
       contentHash: versionDoc.contentHash,
       files,
     };
+  }
+
+  /** 下载包内容（用于 CLI 安装） */
+  function bundleContent(kind, name, version) {
+    return bundleFromVersion(kind, name, requirePublished(kind, name, version));
+  }
+
+  /** 审核 diff 用：读取任意状态的版本内容（可见性由调用方校验） */
+  function rawBundle(kind, name, version) {
+    const versionDoc = getVersion(kind, name, version);
+    if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+    return bundleFromVersion(kind, name, versionDoc);
   }
 
   /** 单文件预览 */
@@ -401,6 +411,7 @@ export function createStore(config, { audit } = {}) {
     getVersion,
     requirePublished,
     bundleContent,
+    rawBundle,
     fileContent,
     listPackages,
     packageDetail,

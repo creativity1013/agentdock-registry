@@ -22,6 +22,7 @@ const state = {
   kind: '',
   detail: null,
   reviewCount: 0,
+  page: 1,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -250,9 +251,12 @@ async function render() {
 /* ------------------------------ 市场 ------------------------------ */
 
 async function renderMarket(main) {
+  const pageSize = 12;
   const params = new URLSearchParams();
   if (state.q) params.set('q', state.q);
   if (state.kind) params.set('kind', state.kind);
+  params.set('page', String(state.page));
+  params.set('pageSize', String(pageSize));
 
   const [stats, list] = await Promise.all([
     api('/stats'),
@@ -276,6 +280,7 @@ async function renderMarket(main) {
     value: state.q,
     onInput: () => {
       state.q = search.value.trim();
+      state.page = 1;
       clearTimeout(search._timer);
       search._timer = setTimeout(() => render(), 260);
     },
@@ -283,7 +288,7 @@ async function renderMarket(main) {
 
   const kindSelect = h(
     'select',
-    { onChange: () => (state.kind = kindSelect.value, render()) },
+    { onChange: () => (state.kind = kindSelect.value, state.page = 1, render()) },
     h('option', { value: '' }, '全部类型'),
     ...Object.entries(KIND_LABEL).map(([value, label]) => h('option', { value }, label)),
   );
@@ -304,11 +309,38 @@ async function renderMarket(main) {
     ? h('div', { class: 'package-grid' }, ...list.items.map(packageCard))
     : h('div', { class: 'empty' }, h('p', {}, '还没有已发布的能力包'), can('publisher') ? h('p', { class: 'hint' }, '点击「导入 JSON 包」或使用 CLI：agentdock publish <目录>') : null);
 
+  const pager = list.totalPages > 1
+    ? h(
+        'div',
+        { class: 'pager' },
+        h('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          disabled: list.page <= 1,
+          onClick: () => {
+            state.page = list.page - 1;
+            render();
+          },
+        }, '上一页'),
+        h('span', { class: 'muted' }, `第 ${list.page} / ${list.totalPages} 页`),
+        h('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          disabled: list.page >= list.totalPages,
+          onClick: () => {
+            state.page = list.page + 1;
+            render();
+          },
+        }, '下一页'),
+      )
+    : null;
+
   main.replaceChildren(
     statsGrid,
     toolbar,
     h('div', { class: 'section-title' }, h('h2', {}, '能力市场'), h('span', { class: 'muted' }, `共 ${list.total} 个`)),
     grid,
+    pager,
   );
 }
 
@@ -352,6 +384,190 @@ function describeCapabilities(capabilities) {
   return parts.join(' · ');
 }
 
+/* ------------------------------ Markdown 渲染（安全子集） ------------------------------ */
+
+function inlineNodes(text) {
+  const nodes = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    const token = match[0];
+    if (token.startsWith('`')) {
+      nodes.push(h('code', {}, token.slice(1, -1)));
+    } else if (token.startsWith('**')) {
+      nodes.push(h('strong', {}, token.slice(2, -2)));
+    } else if (token.startsWith('*')) {
+      nodes.push(h('em', {}, token.slice(1, -1)));
+    } else {
+      const link = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+      nodes.push(h('a', { href: link[2], target: '_blank', rel: 'noopener noreferrer' }, link[1]));
+    }
+    last = match.index + token.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+/** 把 markdown 文本渲染为 DOM（先转文本节点，天然防 XSS；只放行 http(s) 链接） */
+function renderMarkdown(source) {
+  const lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
+  const fragment = document.createDocumentFragment();
+  const paragraph = [];
+  const flush = () => {
+    if (paragraph.length === 0) return;
+    fragment.append(h('p', {}, ...inlineNodes(paragraph.join(' '))));
+    paragraph.length = 0;
+  };
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const fence = line.match(/^```([\w+-]*)\s*$/);
+    if (fence) {
+      flush();
+      const code = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      fragment.append(
+        h('pre', { class: 'code' }, h('code', { class: fence[1] ? `lang-${fence[1]}` : null }, code.join('\n'))),
+      );
+      continue;
+    }
+    if (/^\s*$/.test(line)) {
+      flush();
+      index += 1;
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      flush();
+      fragment.append(h(`h${Math.min(heading[1].length + 1, 5)}`, {}, ...inlineNodes(heading[2])));
+      index += 1;
+      continue;
+    }
+    if (/^---+\s*$/.test(line)) {
+      flush();
+      fragment.append(h('hr'));
+      index += 1;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      flush();
+      const quote = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quote.push(lines[index].replace(/^>\s?/, ''));
+        index += 1;
+      }
+      fragment.append(h('blockquote', {}, ...inlineNodes(quote.join(' '))));
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      flush();
+      const items = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
+        items.push(h('li', {}, ...inlineNodes(lines[index].replace(/^[-*]\s+/, ''))));
+        index += 1;
+      }
+      fragment.append(h('ul', {}, ...items));
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      flush();
+      const items = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
+        items.push(h('li', {}, ...inlineNodes(lines[index].replace(/^\d+\.\s+/, ''))));
+        index += 1;
+      }
+      fragment.append(h('ol', {}, ...items));
+      continue;
+    }
+    paragraph.push(line);
+    index += 1;
+  }
+  flush();
+  return fragment;
+}
+
+/* ------------------------------ 审核差异视图 ------------------------------ */
+
+async function openDiff(pkg, version) {
+  const modal = $('#diff-modal');
+  const body = $('#diff-body');
+  body.replaceChildren(h('p', { class: 'muted' }, '加载差异中…'));
+  modal.classList.remove('hidden');
+  try {
+    const data = await api(
+      `/packages/${encodeURIComponent(pkg.kind)}/${encodeURIComponent(pkg.name)}/diff?to=${encodeURIComponent(version)}`,
+    );
+    paintDiff(pkg, data);
+  } catch (error) {
+    body.replaceChildren(h('div', { class: 'empty' }, `无法加载差异：${error.message}`));
+  }
+}
+
+function closeDiff() {
+  $('#diff-modal').classList.add('hidden');
+}
+
+function diffLineNode(line) {
+  return h(
+    'div',
+    { class: `diff-line ${line.type}` },
+    h('span', { class: 'gutter' }, line.type === 'add' ? '' : String(line.oldLine ?? '')),
+    h('span', { class: 'gutter' }, line.type === 'del' ? '' : String(line.newLine ?? '')),
+    h('span', { class: 'sign' }, line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' '),
+    h('span', { class: 'text' }, line.text || ' '),
+  );
+}
+
+function paintDiff(pkg, data) {
+  const body = $('#diff-body');
+  const head = h(
+    'div',
+    { class: 'detail-head' },
+    kindChip(pkg.kind),
+    h('h2', {}, pkg.name),
+    h('span', { class: 'version' }, data.from ? `v${data.from.version} → v${data.to.version}` : `新增 v${data.to.version}`),
+  );
+  const stats = h(
+    'div',
+    { class: 'diff-stats' },
+    h('span', { class: 'chip add' }, `+${data.stats.added} 新增`),
+    h('span', { class: 'chip del' }, `−${data.stats.removed} 删除`),
+    h('span', { class: 'chip' }, `~${data.stats.modified} 修改`),
+    h('span', { class: 'chip' }, `${data.stats.addedLines} 行新增 / ${data.stats.removedLines} 行删除`),
+    data.to.status !== 'published' ? h('span', { class: 'chip warn' }, '待审核版本') : null,
+  );
+  const files = data.files.length
+    ? data.files.map((file) =>
+        h(
+          'div',
+          { class: 'diff-file' },
+          h(
+            'div',
+            { class: 'diff-file-head' },
+            h('span', { class: 'mono' }, file.path),
+            h('span', { class: `status ${file.status}` }, file.status === 'added' ? '新增' : file.status === 'removed' ? '删除' : '修改'),
+            file.binary ? h('span', { class: 'muted' }, '二进制文件') : null,
+            file.tooLarge ? h('span', { class: 'muted' }, '文件较大，未逐行对比') : null,
+          ),
+          file.lines ? h('div', { class: 'diff-lines' }, ...file.lines.map(diffLineNode)) : null,
+        ),
+      )
+    : [h('div', { class: 'empty' }, '两个版本内容一致')];
+  body.replaceChildren(
+    head,
+    stats,
+    data.truncated ? h('p', { class: 'hint' }, '文件较多，仅展示前 100 个有变化的文件。') : null,
+    h('div', { class: 'diff-body' }, ...files),
+  );
+}
+
 /* ------------------------------ 详情弹窗 ------------------------------ */
 
 async function openDetail(kind, name) {
@@ -368,6 +584,33 @@ async function openDetail(kind, name) {
 function closeModal() {
   $('#modal').classList.add('hidden');
   state.detail = null;
+}
+
+function paintPreview() {
+  const preview = state.detail.preview;
+  if (!preview) return null;
+  const isMarkdown = /\.(md|markdown|mdx)$/i.test(preview.path || '');
+  const rendered = isMarkdown && !preview.raw;
+  return h(
+    'div',
+    { class: 'preview' },
+    h(
+      'div',
+      { class: 'preview-bar' },
+      h('span', { class: 'mono muted' }, preview.path || ''),
+      isMarkdown
+        ? h('button', {
+            class: 'btn btn-ghost btn-sm',
+            type: 'button',
+            onClick: () => {
+              preview.raw = !preview.raw;
+              paintDetail();
+            },
+          }, rendered ? '查看原文' : '渲染 markdown')
+        : null,
+    ),
+    rendered ? h('div', { class: 'md' }, renderMarkdown(preview.content)) : h('pre', { class: 'code' }, preview.content),
+  );
 }
 
 function paintDetail() {
@@ -433,6 +676,11 @@ function paintDetail() {
                 },
               }, `v${version.version}`),
               statusChip(version.status, version.statusLabel),
+              h('button', {
+                class: 'btn btn-ghost btn-sm',
+                type: 'button',
+                onClick: () => openDiff(pkg, version.version),
+              }, '差异'),
               h('span', { class: 'grow muted' }, `${version.fileCount} 文件 · ${kb(version.totalBytes)} · ${fmtTime(version.submittedAt)} · ${version.submittedBy}`),
               ...scanChips(version.scan),
             ),
@@ -458,7 +706,7 @@ function paintDetail() {
             ),
           ),
         ),
-        state.detail.preview ? h('pre', { class: 'code' }, state.detail.preview.content) : null,
+        paintPreview(),
       )
     : null;
 
@@ -555,6 +803,11 @@ function actionControls(pkg, selected) {
     nodes.push(
       h('span', { class: 'hint' }, '审核：'),
       note,
+      h('button', {
+        class: 'btn btn-ghost',
+        type: 'button',
+        onClick: () => openDiff(pkg, selected.version),
+      }, '查看差异'),
       h(
         'button',
         {
@@ -592,7 +845,7 @@ async function reviewAction(pkg, selected, decision, note) {
 async function previewFile(pkg, version, filePath) {
   try {
     const data = await api(`/packages/${encodeURIComponent(pkg.kind)}/${encodeURIComponent(pkg.name)}/versions/${encodeURIComponent(version)}/files?path=${encodeURIComponent(filePath)}`);
-    state.detail.preview = { version, content: data.file.content };
+    state.detail.preview = { version, path: filePath, content: data.file.content, raw: false };
     paintDetail();
   } catch (error) {
     toast(`读取文件失败：${error.message}`, 'error');
@@ -618,6 +871,11 @@ async function renderReview(main) {
       ...scanChips({ summary: item.scanSummary || { high: 0, medium: 0, low: 0, total: 0 } }),
       h('span', { class: 'tag' }, `${item.scanSummary?.high || 0} 高危`),
       note,
+      h('button', {
+        class: 'btn btn-ghost btn-sm',
+        type: 'button',
+        onClick: () => openDiff({ kind: item.kind, name: item.name }, item.version),
+      }, '差异'),
       h('button', {
         class: 'btn btn-primary btn-sm',
         type: 'button',
@@ -771,8 +1029,15 @@ async function init() {
   document.querySelector('#modal').addEventListener('click', (event) => {
     if (event.target.dataset.close) closeModal();
   });
+  document.querySelector('#diff-close').addEventListener('click', closeDiff);
+  document.querySelector('#diff-modal').addEventListener('click', (event) => {
+    if (event.target.dataset.diffClose) closeDiff();
+  });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') closeModal();
+    if (event.key === 'Escape') {
+      closeDiff();
+      closeModal();
+    }
   });
   document.querySelector('#publish-file').addEventListener('change', onPublishFile);
 

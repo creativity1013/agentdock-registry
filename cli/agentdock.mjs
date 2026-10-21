@@ -381,6 +381,7 @@ async function cmdList(flags) {
   if (flags.kind) query.set('kind', String(flags.kind));
   if (flags.q) query.set('q', String(flags.q));
   if (flags.status) query.set('status', String(flags.status));
+  query.set('pageSize', '100');
   const data = await api(conn, 'GET', `/api/v1/packages?${query.toString()}`);
   if (flags.json) return console.log(JSON.stringify(data, null, 2));
   printTable(

@@ -289,3 +289,133 @@ test('dsh-agent 目标：agent 包装成 DSH preset 片段，非 agent 包被拒
   });
   assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
 });
+
+test('市场分页：page / pageSize / totalPages 与筛选组合', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.close());
+  const { request, tokens } = server;
+
+  for (const [name, description, kind] of [
+    ['page-alpha', '分页测试 alpha', 'skill'],
+    ['page-beta', '分页测试 beta 特殊词', 'skill'],
+    ['page-gamma', '分页测试 gamma', 'skill'],
+  ]) {
+    const published = await request('POST', '/packages', {
+      token: tokens.publisher,
+      body: skillPayload({
+        name,
+        description,
+        kind,
+        files: [
+          {
+            path: 'SKILL.md',
+            encoding: 'utf8',
+            content: `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n做演示。\n`,
+          },
+        ],
+      }),
+    });
+    assert.equal(published.status, 201, JSON.stringify(published.data));
+  }
+  await approveAll(request, tokens.reviewer);
+
+  const first = await request('GET', '/packages?pageSize=2&page=1');
+  assert.equal(first.status, 200);
+  assert.equal(first.data.total, 3);
+  assert.equal(first.data.page, 1);
+  assert.equal(first.data.pageSize, 2);
+  assert.equal(first.data.totalPages, 2);
+  assert.equal(first.data.items.length, 2);
+
+  const second = await request('GET', '/packages?pageSize=2&page=2');
+  assert.equal(second.data.page, 2);
+  assert.equal(second.data.items.length, 1);
+  assert.ok(!first.data.items.some((item) => second.data.items.some((other) => other.name === item.name)));
+
+  const beyond = await request('GET', '/packages?pageSize=2&page=9');
+  assert.equal(beyond.data.page, 9);
+  assert.equal(beyond.data.items.length, 0);
+
+  const filtered = await request('GET', '/packages?q=特殊词&pageSize=10');
+  assert.equal(filtered.data.total, 1);
+  assert.equal(filtered.data.items[0].name, 'page-beta');
+});
+
+test('审核 diff：默认对比上一个发布版本，未发布版本需审核权限', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.close());
+  const { request, tokens } = server;
+
+  const skillFile = (description, body) =>
+    `---\nname: demo-skill\ndescription: ${description}\n---\n\n${body}`;
+
+  const v1 = await request('POST', '/packages', {
+    token: tokens.publisher,
+    body: skillPayload({
+      files: [{ path: 'SKILL.md', encoding: 'utf8', content: skillFile('第一版', '# 演示\n\n第一版说明。\n') }],
+    }),
+  });
+  assert.equal(v1.status, 201, JSON.stringify(v1.data));
+  // 首版尚无基线
+  const reviewer = { token: tokens.reviewer };
+  const firstDiff = await request('GET', '/packages/skill/demo-skill/diff?to=0.1.0', reviewer);
+  assert.equal(firstDiff.status, 200);
+  assert.equal(firstDiff.data.from, null);
+  assert.equal(firstDiff.data.to.version, '0.1.0');
+  assert.equal(firstDiff.data.files.length, 1);
+  assert.equal(firstDiff.data.files[0].status, 'added');
+
+  await request('POST', '/review', {
+    token: tokens.reviewer,
+    body: { kind: 'skill', name: 'demo-skill', version: '0.1.0', decision: 'approve' },
+  });
+
+  const v2 = await request('POST', '/packages', {
+    token: tokens.publisher,
+    body: skillPayload({
+      version: '0.2.0',
+      files: [
+        {
+          path: 'SKILL.md',
+          encoding: 'utf8',
+          content: skillFile('第二版', '# 演示\n\n第二版说明。\n新增一行。\n'),
+        },
+      ],
+    }),
+  });
+  assert.equal(v2.status, 201, JSON.stringify(v2.data));
+  assert.equal(v2.data.version.status, 'pending');
+
+  // 未发布版本对匿名用户不可见
+  const anonymous = await request('GET', '/packages/skill/demo-skill/diff?to=0.2.0');
+  assert.equal(anonymous.status, 404);
+
+  const pendingDiff = await request('GET', '/packages/skill/demo-skill/diff?to=0.2.0', reviewer);
+  assert.equal(pendingDiff.status, 200);
+  assert.equal(pendingDiff.data.from.version, '0.1.0');
+  assert.equal(pendingDiff.data.to.version, '0.2.0');
+  assert.equal(pendingDiff.data.to.status, 'pending');
+  const changed = pendingDiff.data.files.find((file) => file.path === 'SKILL.md');
+  assert.equal(changed.status, 'modified');
+  assert.ok(changed.added >= 1);
+  assert.ok(changed.removed >= 1);
+  assert.ok(changed.lines.some((line) => line.type === 'add'));
+  assert.ok(changed.lines.some((line) => line.type === 'del'));
+
+  await request('POST', '/review', {
+    token: tokens.reviewer,
+    body: { kind: 'skill', name: 'demo-skill', version: '0.2.0', decision: 'approve' },
+  });
+
+  // 发布后匿名可见，默认基线仍是 0.1.0
+  const publicDiff = await request('GET', '/packages/skill/demo-skill/diff?to=0.2.0');
+  assert.equal(publicDiff.status, 200);
+  assert.equal(publicDiff.data.from.version, '0.1.0');
+
+  const explicit = await request('GET', '/packages/skill/demo-skill/diff?from=0.1.0&to=0.2.0');
+  assert.equal(explicit.status, 200);
+  assert.equal(explicit.data.files[0].path, 'SKILL.md');
+
+  const missing = await request('GET', '/packages/skill/demo-skill/diff?to=9.9.9');
+  assert.equal(missing.status, 404);
+});

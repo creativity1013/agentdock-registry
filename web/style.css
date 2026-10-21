@@ -731,3 +731,240 @@ pre.code {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ------------------------------ 市场分页 ------------------------------ */
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 26px 0 10px;
+}
+
+.pager .btn {
+  min-width: 88px;
+}
+
+.pager .btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ------------------------------ markdown 预览 ------------------------------ */
+
+.preview {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  overflow: auto;
+  max-height: 460px;
+}
+
+.preview-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.md {
+  padding: 14px 18px;
+  line-height: 1.75;
+  font-size: 14px;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md h2,
+.md h3,
+.md h4,
+.md h5 {
+  margin: 18px 0 8px;
+  line-height: 1.35;
+}
+
+.md h2 {
+  font-size: 20px;
+}
+
+.md h3 {
+  font-size: 17px;
+}
+
+.md h4,
+.md h5 {
+  font-size: 15px;
+}
+
+.md p {
+  margin: 8px 0;
+}
+
+.md ul,
+.md ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.md li {
+  margin: 3px 0;
+}
+
+.md code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: rgba(120, 145, 190, 0.18);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.md pre.code {
+  margin: 10px 0;
+  padding: 12px 14px;
+  overflow: auto;
+  background: rgba(10, 16, 26, 0.7);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.md pre.code code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+.md blockquote {
+  margin: 10px 0;
+  padding: 6px 14px;
+  border-left: 3px solid var(--primary);
+  color: var(--text-dim);
+}
+
+.md a {
+  color: var(--primary);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+/* ------------------------------ 版本差异 ------------------------------ */
+
+.modal-wide {
+  width: min(1120px, 97vw);
+}
+
+.diff-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.chip.add,
+.status.added {
+  color: var(--green);
+  border-color: rgba(61, 220, 151, 0.4);
+}
+
+.chip.del,
+.status.removed {
+  color: var(--red);
+  border-color: rgba(255, 107, 107, 0.4);
+}
+
+.status.modified {
+  color: var(--amber);
+}
+
+.diff-file {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-soft);
+}
+
+.diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.diff-file-head .status {
+  font-size: 12px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.diff-lines {
+  max-height: 360px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.diff-line {
+  display: flex;
+  gap: 6px;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line .gutter {
+  flex: none;
+  width: 36px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.diff-line .sign {
+  flex: none;
+  width: 12px;
+  color: var(--text-faint);
+}
+
+.diff-line .text {
+  flex: 1;
+}
+
+.diff-line.add {
+  background: rgba(61, 220, 151, 0.1);
+}
+
+.diff-line.add .sign {
+  color: var(--green);
+}
+
+.diff-line.del {
+  background: rgba(255, 107, 107, 0.1);
+}
+
+.diff-line.del .sign {
+  color: var(--red);
+}
+
+.diff-line.same {
+  opacity: 0.72;
+}

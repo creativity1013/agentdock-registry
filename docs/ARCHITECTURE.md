@@ -61,6 +61,10 @@ store.review()  ── approve → status=published（冻结，不可覆盖）
                 └ reject  → status=rejected（可覆盖重提）
   ▼
 audit.append('review.approve' | 'review.reject')
+
+审核界面另调 GET /api/v1/packages/:kind/:name/diff?to=<version>
+  └ 默认基线为「上一个已发布版本」；pending 版本仅 reviewer/admin 可见；
+    返回文件级增删改 + 文本文件逐行 diff（超出规模上限时整文件标记）
 ```
 
 ### 安装
@@ -171,6 +175,7 @@ data/
 | `src/validate.mjs` | 三类 kind 结构校验 → manifest | `validateBundle`、`describeBundle`、`KNOWN_AGENT_TOOLS` |
 | `src/scan.mjs` | 安全规则引擎 | `scanBundle`、`scanVerdict`、`SEVERITY_ORDER` |
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
+| `src/diff.mjs` | 行级/文件级差异（LCS + 规模上限降级） | `diffLines`、`diffBundles` |
 | `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished`） |
 | `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
@@ -180,7 +185,7 @@ data/
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
 | `cli/agentdock.mjs` | 命令行、本地校验、导入器 | — |
 
-依赖方向：`cli / server → app → store / targets / pipeline → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
+依赖方向：`cli / server → app → store / targets / pipeline / diff → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
 
 ## 5. 安全模型
 
@@ -264,13 +269,13 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 | 依赖 | 零第三方依赖 | 离线可跑、供应链小、安装即用 | YAML/路由等子集实现自维护 |
 | 打包 | JSON bundle | 跨语言、可读、CLI/CI 友好 | 大包体积膨胀；后续可加 tar 流式上传 |
 | 存储 | JSON + 文件系统 | 可备份、可审查、实现简单 | 全量索引常驻内存；>1 万包应换 SQLite |
-| 前端 | 原生 JS | 无构建、无依赖 | markdown 渲染/diff 等复杂交互后补 |
+| 前端 | 原生 JS | 无构建、无依赖 | markdown/表格等扩展受限；diff 为轻量 LCS |
 | 审核 | 人工 + 规则 | 误报可控，责任可追溯 | 大规模需策略引擎/自动审批 |
 | 安装 | 平台只产计划，CLI 执行 | 用户机器权限边界清晰 | 无法远程批量部署；可加受控 agent |
 
 ## 9. 测试策略
 
-- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等）。
+- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。

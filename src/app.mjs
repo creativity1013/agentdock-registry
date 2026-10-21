@@ -9,6 +9,7 @@ import { planInstall, applyInstall, summarizePlan, listTargets } from './targets
 import { AppError, badRequest, unauthorized, forbidden, notFound, unprocessable, tooLarge } from './errors.mjs';
 import { LIMITS } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
+import { diffBundles } from './diff.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
 
@@ -125,7 +126,19 @@ export function createApp(config = loadConfig()) {
         status: status === 'all' ? '' : status,
         includePending,
       });
-      return sendJson(res, 200, list);
+      const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+      const pageSize = Math.min(
+        100,
+        Math.max(1, Number.parseInt(url.searchParams.get('pageSize') || '24', 10) || 24),
+      );
+      const start = (page - 1) * pageSize;
+      return sendJson(res, 200, {
+        total: list.total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(list.total / pageSize)),
+        items: list.items.slice(start, start + pageSize),
+      });
     }
 
     // 发布
@@ -179,6 +192,45 @@ export function createApp(config = loadConfig()) {
       const filePath = url.searchParams.get('path');
       if (!filePath) throw badRequest('缺少 path 查询参数');
       return sendJson(res, 200, { ok: true, file: store.fileContent(kind, name, version, filePath) });
+    }
+
+    // 版本差异（审核 diff 视图）：默认与上一个已发布版本对比
+    const diffMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/diff$/);
+    if (diffMatch && method === 'GET') {
+      const [, kind, name] = diffMatch;
+      const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
+      const detail = store.packageDetail(kind, name, { includePending: privileged });
+      const requestedTo = url.searchParams.get('to');
+      const toVersion = requestedTo || detail.versions[0]?.version || null;
+      if (!toVersion) throw notFound('该包还没有可比对的版本');
+      const toDoc = store.getVersion(kind, name, toVersion);
+      if (!toDoc) throw notFound(`版本不存在：${kind}/${name}@${toVersion}`);
+      if (toDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
+      let fromVersion = url.searchParams.get('from');
+      if (!fromVersion) {
+        const baseline = detail.versions.find(
+          (item) => item.status === 'published' && item.version !== toDoc.version,
+        );
+        fromVersion = baseline?.version || null;
+      }
+      let fromDoc = null;
+      if (fromVersion) {
+        fromDoc = store.getVersion(kind, name, fromVersion);
+        if (!fromDoc) throw notFound(`基线版本不存在：${fromVersion}`);
+        if (fromDoc.status !== 'published' && !privileged) throw notFound('基线版本不可见');
+      }
+      const result = diffBundles(
+        fromDoc ? store.rawBundle(kind, name, fromDoc.version) : { files: [] },
+        store.rawBundle(kind, name, toDoc.version),
+      );
+      return sendJson(res, 200, {
+        ok: true,
+        kind,
+        name,
+        from: fromDoc ? { version: fromDoc.version, status: fromDoc.status } : null,
+        to: { version: toDoc.version, status: toDoc.status },
+        ...result,
+      });
     }
 
     // 安装计数上报（CLI 安装成功后上报）
