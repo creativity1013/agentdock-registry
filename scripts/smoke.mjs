@@ -25,7 +25,14 @@ let server = null;
 async function runCli(args, token) {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: home, USERPROFILE: home, AGENTDOCK_URL: server.url, AGENTDOCK_TOKEN: token },
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        DSH_HOME: path.join(home, '.dsh'),
+        AGENTDOCK_URL: server.url,
+        AGENTDOCK_TOKEN: token,
+      },
       maxBuffer: 10 * 1024 * 1024,
     });
     return `${stdout}${stderr}`;
@@ -87,7 +94,28 @@ async function main() {
   await runCli(['install', 'plugin/ops-kit', '--target', 'dsh', '--force'], tokens.publisher);
   assert(fs.existsSync(path.join(home, '.dsh', 'plugins', 'ops-kit', 'plugin.json')), 'plugin 安装到 DSH 失败');
   assert(fs.existsSync(path.join(home, '.dsh', 'plugins', 'ops-kit', 'skills', 'incident-checklist', 'SKILL.md')), 'plugin 内技能未落盘');
-  console.log('✓ CLI 安装到自定义目录 / Claude Code / DSH 均成功');
+
+  // agent → DSH agent-preset 片段，并自动并入 profile patch
+  const presetArgs = ['install', 'agent/code-reviewer', '--target', 'dsh-agent', '--profile', 'web', '--force'];
+  await runCli(presetArgs, tokens.publisher);
+  const fragmentFile = path.join(home, '.dsh', 'agentdock', 'presets', 'code-reviewer.patch.yml');
+  assert(fs.existsSync(fragmentFile), 'agent 的 DSH preset 片段未生成');
+  const fragment = fs.readFileSync(fragmentFile, 'utf8');
+  assert(fragment.includes('preset-agentdock-code-reviewer'), 'preset 片段缺少 preset 行');
+  assert(fragment.includes("- id: tool-fs"), 'preset 片段缺少工具插件行');
+  const profilePatch = path.join(home, '.dsh', 'profiles', 'web', 'cordis.patch.yml');
+  assert(fs.existsSync(profilePatch), 'profile patch 未写入');
+  assert(
+    fs.readFileSync(profilePatch, 'utf8').includes('# >>> agentdock preset agentdock-code-reviewer'),
+    'profile patch 缺少 agentdock 标记块',
+  );
+  await runCli(presetArgs, tokens.publisher);
+  const patchText = fs.readFileSync(profilePatch, 'utf8');
+  assert(
+    (patchText.match(/id: preset-agentdock-code-reviewer/g) || []).length === 1,
+    '重复并入 profile 产生了叠加',
+  );
+  console.log('✓ CLI 安装到自定义目录 / Claude Code / DSH / DSH agent-preset 均成功');
 
   // 安装计数与审计
   const detail = await fetch(`${server.url}/api/v1/packages/skill/code-reviewer`).then((response) => response.json());

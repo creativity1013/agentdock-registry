@@ -8,6 +8,11 @@ import { readBundleFromDirectory, KINDS, KIND_LABEL } from '../src/bundle.mjs';
 import { analyzeInput } from '../src/pipeline.mjs';
 import { parseFrontmatter } from '../src/yaml.mjs';
 import { planInstall, applyInstall, summarizePlan, TARGET_LABEL, TARGET_IDS } from '../src/targets.mjs';
+import {
+  renderPresetPatch,
+  upsertProfilePatch,
+  writePresetFragment,
+} from '../src/dsh-preset.mjs';
 import { resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
 import { formatBytes } from '../src/util.mjs';
 
@@ -23,10 +28,12 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
 
   agentdock publish <目录> [--type skill|agent|plugin] [--version 0.1.0] [--name <name>] [--dry-run]
   agentdock verify <目录>                          本地校验 + 安全扫描，不提交
-  agentdock import-claude [--dir ~/.claude/agents] [--publish]   导入 Claude Code 的 agent 定义
+  agentdock import-claude [--dir ~/.claude/agents] [--publish] [--presets] [--presets-dir <目录>] [--profile <profile>]
+                                                   导入 Claude Code agent；可同时生成 DSH agent-preset 片段
 
   agentdock list [--kind skill|agent|plugin] [--q 关键词] [--status published]
-  agentdock install <kind>/<name>[@version] [--target dsh|claude|codex|shared|dir] [--dir <路径>] [--force]
+  agentdock install <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--force] [--profile <profile>]
+                                                   target=dsh-agent 生成 DSH preset 片段；--profile 会并入该 profile 的 cordis.patch.yml
 
   agentdock review list                            审核队列（需 reviewer 角色）
   agentdock review approve <kind>/<name>@<version> [--note "..."]
@@ -419,6 +426,25 @@ async function cmdInstall(positionals, flags) {
   console.log(`  目标目录：${summary.absolutePath}`);
   for (const file of summary.files) console.log(`  - ${file.targetPath}`);
   for (const note of summary.notes) console.log(`  ! ${note}`);
+  if (summary.preset) {
+    console.log(`  预设 id：${summary.preset.id}`);
+    console.log(`  preset 插件行：${summary.preset.pluginIds.join(', ')}`);
+    for (const warning of summary.preset.warnings) console.log(`  ! ${warning}`);
+    if (typeof flags.profile === 'string' && flags.profile.trim()) {
+      const merged = upsertProfilePatch({
+        profile: flags.profile.trim(),
+        home: resolveHome(),
+        presetId: summary.preset.id,
+        body: plan.preset.body,
+      });
+      console.log(
+        `✓ 已并入 profile「${flags.profile.trim()}」：${merged.file}${merged.replaced ? '（替换旧块）' : ''}`,
+      );
+      console.log('  重启 DSH 后即可在 Settings → Agent presets 中选择该 preset。');
+    } else {
+      console.log('  提示：加 --profile <name> 可自动并入该 profile 的 cordis.patch.yml。');
+    }
+  }
   try {
     await api(conn, 'POST', `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/install-event`, { target });
   } catch (error) {
@@ -498,13 +524,31 @@ async function cmdImportClaude(flags) {
   }
   const conn = resolveConnection(flags);
   const publish = Boolean(flags.publish);
+  const presetsMode = Boolean(flags.presets || flags['presets-dir'] || flags.profile);
+  const customPresetsDir =
+    typeof flags['presets-dir'] === 'string' ? path.resolve(flags['presets-dir']) : null;
+  const targetProfile = typeof flags.profile === 'string' ? flags.profile.trim() : '';
   let ok = 0;
   let failed = 0;
+  let presetsWritten = 0;
+  let skipped = 0;
+  const seenNames = new Set();
+  if (presetsMode) {
+    console.log(
+      `（同时生成 DSH agent-preset 片段${customPresetsDir ? `到 ${customPresetsDir}` : ''}${targetProfile ? `，并入 profile「${targetProfile}」` : ''}）`,
+    );
+  }
   for (const fileName of entries) {
     const abs = path.join(dir, fileName);
     const content = fs.readFileSync(abs, 'utf8');
     const frontmatter = parseFrontmatter(content).data || {};
     const name = String(frontmatter.name || fileName.replace(/\.md$/, '')).trim();
+    if (seenNames.has(name)) {
+      skipped += 1;
+      console.log(`- ${name}  跳过：${fileName} 与之前的文件使用了相同 name`);
+      continue;
+    }
+    seenNames.add(name);
     const payload = {
       kind: 'agent',
       name,
@@ -523,23 +567,56 @@ async function cmdImportClaude(flags) {
       }
       continue;
     }
+    let presetNote = '';
+    if (presetsMode) {
+      try {
+        const preset = renderPresetPatch(payload);
+        let presetFile;
+        if (customPresetsDir) {
+          presetFile = path.join(customPresetsDir, `${name}.patch.yml`);
+          fs.mkdirSync(path.dirname(presetFile), { recursive: true });
+          fs.writeFileSync(presetFile, preset.yaml);
+        } else {
+          presetFile = writePresetFragment({ home: resolveHome(), name, yaml: preset.yaml });
+        }
+        presetNote = `  preset → ${presetFile}`;
+        presetsWritten += 1;
+        if (targetProfile) {
+          const merged = upsertProfilePatch({
+            profile: targetProfile,
+            home: resolveHome(),
+            presetId: preset.presetId,
+            body: preset.body,
+          });
+          presetNote += `（已并入 profile ${targetProfile}${merged.replaced ? '，替换旧块' : ''}）`;
+        }
+        if (preset.warnings.length > 0) {
+          for (const warning of preset.warnings) console.log(`  ! ${warning}`);
+        }
+      } catch (error) {
+        console.log(`✗ ${name}  生成 DSH preset 失败：${error.message}`);
+        failed += 1;
+        continue;
+      }
+    }
     if (!publish) {
       ok += 1;
-      console.log(`${status} ${name}  ${frontmatter.description || ''}`);
+      console.log(`${status} ${name}  ${frontmatter.description || ''}${presetNote}`);
       continue;
     }
     try {
       await api(conn, 'POST', '/api/v1/packages', payload);
       ok += 1;
-      console.log(`✓ 已提交 ${name}`);
+      console.log(`✓ 已提交 ${name}${presetNote}`);
     } catch (error) {
       failed += 1;
       console.log(`✗ ${name}  ${error.message}`);
     }
   }
   console.log('');
-  if (publish) console.log(`导入完成：成功 ${ok}，失败 ${failed}（提交后需审核）`);
-  else console.log(`扫描完成：可发布 ${ok}，失败 ${failed}。加 --publish 提交到服务端`);
+  if (publish) console.log(`导入完成：成功 ${ok}，失败 ${failed}${skipped ? `，跳过 ${skipped}` : ''}（提交后需审核）`);
+  else console.log(`扫描完成：可发布 ${ok}，失败 ${failed}${skipped ? `，跳过 ${skipped}` : ''}。加 --publish 提交到服务端`);
+  if (presetsMode) console.log(`DSH preset 片段：已生成 ${presetsWritten} 个${targetProfile ? `，并已并入 profile「${targetProfile}」` : ''}。重启 DSH 后生效`);
 }
 
 /* ------------------------------ 入口 ------------------------------ */

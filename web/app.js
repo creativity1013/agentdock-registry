@@ -7,6 +7,7 @@ const ROLE_LABEL = { viewer: '只读', publisher: '发布者', reviewer: '审核
 const KIND_LABEL = { skill: '技能', agent: '智能体', plugin: '插件' };
 const TARGETS = [
   ['dsh', 'DSH (~/.dsh)'],
+  ['dsh-agent', 'DSH Agent Preset (~/.dsh/agentdock/presets)'],
   ['claude', 'Claude Code (~/.claude)'],
   ['codex', 'Codex CLI (~/.codex)'],
   ['shared', '共享目录 (~/.agents)'],
@@ -497,7 +498,8 @@ function actionControls(pkg, selected) {
     return nodes;
   }
   if (selected && selected.status === 'published') {
-    const targetSelect = h('select', {}, ...TARGETS.map(([value, label]) => h('option', { value }, label)));
+    const availableTargets = TARGETS.filter(([value]) => value !== 'dsh-agent' || pkg.kind === 'agent');
+    const targetSelect = h('select', {}, ...availableTargets.map(([value, label]) => h('option', { value }, label)));
     const dirInput = h('input', { placeholder: '自定义安装目录，例如 ~/.agents', style: 'display:none' });
     targetSelect.addEventListener('change', () => {
       dirInput.style.display = targetSelect.value === 'dir' ? '' : 'none';
@@ -508,6 +510,9 @@ function actionControls(pkg, selected) {
       targetSelect,
       dirInput,
       h('label', { class: 'hint' }, force, ' 覆盖已有文件'),
+      pkg.kind === 'agent'
+        ? h('span', { class: 'hint' }, 'dsh-agent 会生成 DSH preset 片段；要自动并入 profile，请用 CLI：agentdock install … --profile <名字>')
+        : null,
       h(
         'button',
         {

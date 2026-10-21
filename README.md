@@ -77,6 +77,7 @@ agentdock list --kind skill
 agentdock install skill/code-reviewer --target dsh
 agentdock install agent/code-reviewer --target claude --force
 agentdock install plugin/ops-kit --target dir --dir ./out
+agentdock install agent/code-reviewer --target dsh-agent --profile web --force  # 生成 DSH preset 片段并并入 profile
 
 # 审计与令牌
 agentdock audit --limit 20
@@ -85,6 +86,8 @@ agentdock tokens create --name ci-bot --role publisher
 # 把 ~/.claude/agents/*.md 批量导入为 agent 包（默认干跑，--publish 才提交）
 agentdock import-claude
 agentdock import-claude --publish
+agentdock import-claude --presets                 # 同时生成 DSH agent-preset 片段
+agentdock import-claude --presets --profile web   # 生成并自动并入 web profile
 ```
 
 | 命令 | 说明 |
@@ -96,17 +99,17 @@ agentdock import-claude --publish
 | `list` | 列出已发布能力包（`--kind --json`） |
 | `review queue` | 列出待审核版本 |
 | `review approve\|reject <kind/name@version>` | 审核操作（`--note`） |
-| `install <kind/name[@version]>` | 安装到目标（`--target --dir --force`） |
+| `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段 |
 | `audit` | 查看审计日志（`--limit --action --json`） |
 | `tokens create\|list` | 令牌管理（需 admin） |
-| `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包 |
+| `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
 
 ## 三个概念
 
 | 概念 | 是什么 | 包内文件 | 安装到 |
 | --- | --- | --- | --- |
 | `skill` | 一份可复用的做事方法（渐进披露的指令集） | 根目录 `SKILL.md` | `~/.dsh/skills/<name>/`、`~/.claude/skills/<name>/`、`~/.agents/skills/<name>/` |
-| `agent` | 一个可被派工的角色定义（tools + model + 系统提示） | 根目录 `agent.md` | `~/.claude/agents/<name>.md`（单文件 + sidecar） |
+| `agent` | 一个可被派工的角色定义（tools + model + 系统提示） | 根目录 `agent.md` | `~/.claude/agents/<name>.md`（单文件 + sidecar）；或 `dsh-agent` 目标 → DSH preset 片段 |
 | `plugin` | 能力分发容器，可同时含多个 skill/agent | 根目录 `plugin.json` + 子能力 | `~/.dsh/plugins/<name>/` 或目标目录 |
 
 版本语义：`<kind>/<name>@<semver>`。发布后进入 `pending`，审核通过变 `published`（不可再覆盖）；被拒绝为 `rejected`，同一版本号可覆盖重提。
@@ -215,10 +218,13 @@ my-plugin/
 | target | 安装位置 | 说明 |
 | --- | --- | --- |
 | `dsh` | `~/.dsh/skills/<name>/`；agent → `~/.dsh/agents/<name>/`；plugin → `~/.dsh/plugins/<name>/` | 技能直接被 DSH `dsh-skill-filesystem` 发现 |
+| `dsh-agent` | `~/.dsh/agentdock/presets/<name>.patch.yml` | agent 专用：生成 DSH `@deepseek-ai/dsh-agent-preset` 片段（`- insert:` 条目），加 `--profile <name>` 自动并入 `~/.dsh/profiles/<name>/cordis.patch.yml` |
 | `claude` | `~/.claude/skills/<name>/`；agent → `~/.claude/agents/<name>.md` | agent 单文件 + `<name>.agentdock/` sidecar（额外文件） |
 | `codex` | `~/.codex/skills/<name>/` | OpenAI Codex 技能目录 |
 | `shared` | `~/.agents/skills/<name>/` | 多 harness 共享目录 |
 | `dir` | `<dir>/skills/<name>/` | 任意目录，需显式 `--dir` |
+
+`dsh-agent` 目标把 agent 包转成 DSH 的 preset 条目：frontmatter 的 `tools` 映射成插件行（`tool-fs` / `tool-fs-search` / `tool-bash` / `tool-web` / `tool-todo` 等），正文成为 `@deepseek-ai/dsh-persona` 的 `prefix` 系统提示，`skills` 会加上 `skill-filesystem` + `tool-skill`。片段有两种启用方式：临时用 `dsh <profile> --patch <片段文件>` 挂载，或加 `--profile <name>` 由 AgentDock 以带标记的块（`# >>> agentdock preset <id>`）追加进 profile 的 `cordis.patch.yml`，重复执行会替换旧块而不是叠加。`DSH_HOME` 环境变量会覆盖 `~`（用于多 profile/测试）。注意 DSH 的 preset **不携带模型**：`model: sonnet` 这类字段无法映射，模型由会话或 `agent-default-model` 决定。启用后重启 DSH，在 Settings → Agent presets 中选择 `AgentDock · <name>`。
 
 每次安装都会写入 `.agentdock-install.json` 清单（来源、版本、内容哈希、时间、目标）。目标已存在时默认冲突并拒绝覆盖，加 `--force` 覆盖同名文件；目录目标不会清理旧版本遗留的多余文件，需要干净安装时请先手动删除目标目录。
 
@@ -291,7 +297,15 @@ agentdock import-claude --dir <dir> --version 0.2.0
 
 每个 `.md` 会被包装成 `agent` 包：frontmatter 的 `name`/`description` 成为包元信息，`tools`/`model` 保留在 `agent.md` 中；正文即系统提示。导入前会跑同一套结构校验与安全扫描。
 
-> DSH 目前没有 `~/.claude/agents` 原生支持：安装到 `claude` 目标即还原为 Claude Code 可识别的 md；要在 DSH 中使用，推荐用 DSH Creator 模式把 agent 定义转成 agent preset（见 `docs/ARCHITECTURE.md` 的「与 DSH 集成」）。
+导入时加 `--presets` 会顺带生成 DSH preset 片段（默认写入 `~/.dsh/agentdock/presets/`）：
+
+```bash
+agentdock import-claude --presets                    # 干跑 + 生成片段
+agentdock import-claude --presets --profile web      # 生成并并入 web profile（带标记、可重复执行）
+agentdock import-claude --presets-dir ./presets      # 片段写到自定义目录，交给配置管理分发
+```
+
+生成的片段可直接用 DSH 验证：`DSH_HOME=/tmp/dshhome dsh <profile> --patch <片段> --dump-config`。`name` 重复的 md 会被跳过并提示，避免多个文件映射到同一个 preset id。DSH 目前没有 `~/.claude/agents` 原生目录支持：安装到 `claude` 目标即还原为 Claude Code 可识别的 md；要在 DSH 中使用，用 `--target dsh-agent` 或 `import-claude --presets` 生成 preset 片段（原理见 `docs/ARCHITECTURE.md` 的「与 DSH 集成」）。
 
 ## 项目结构
 
@@ -307,6 +321,7 @@ agentdock/
 │   ├── scan.mjs             # 安全扫描规则引擎
 │   ├── store.mjs            # 版本库（JSON 元数据 + 文件落盘 + 审核状态机）
 │   ├── targets.mjs          # 安装目标解析与落盘计划
+│   ├── dsh-preset.mjs       # agent 包 → DSH agent-preset 片段（tools 映射、profile 合并）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
 │   ├── config.mjs           # 配置与数据目录
@@ -348,7 +363,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [ ] 市场分页、全文搜索、标签筛选
 - [ ] markdown 安全渲染与审核 diff 视图
 - [ ] 内容签名（ed25519）与 `verify --signature`
-- [ ] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段）
+- [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
 - [ ] 与外部 registry（GitHub / skills.sh / MCP registry）双向同步
 - [ ] 依赖清单与 SBOM、按策略自动审批
 - [ ] SQLite 存储后端（>1 万包规模）

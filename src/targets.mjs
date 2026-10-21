@@ -3,10 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { ensureDir, nowIso, writeFileAtomic } from './util.mjs';
 import { badRequest, conflict, notFound } from './errors.mjs';
+import { dshHome, renderPresetPatch } from './dsh-preset.mjs';
 
-export const TARGET_IDS = ['dsh', 'claude', 'codex', 'shared', 'dir'];
+export const TARGET_IDS = ['dsh', 'dsh-agent', 'claude', 'codex', 'shared', 'dir'];
 export const TARGET_LABEL = {
   dsh: 'DeepSeek Harness (~/.dsh)',
+  'dsh-agent': 'DSH Agent Preset (~/.dsh/agentdock/presets)',
   claude: 'Claude Code (~/.claude)',
   codex: 'Codex CLI (~/.codex)',
   shared: '共享目录 (~/.agents)',
@@ -14,6 +16,8 @@ export const TARGET_LABEL = {
 };
 export const TARGET_NOTE = {
   dsh: '技能装到 ~/.dsh/skills/<name>/；agent 装到 ~/.dsh/agents/<name>/；插件装到 ~/.dsh/plugins/<name>/',
+  'dsh-agent':
+    '只接受 agent 包：生成 DSH agent-preset 片段到 ~/.dsh/agentdock/presets/<name>.patch.yml；加 --profile <name> 可自动并入该 profile 的 cordis.patch.yml',
   claude: '技能装到 ~/.claude/skills/<name>/；agent 写成 ~/.claude/agents/<name>.md',
   codex: '技能装到 ~/.codex/skills/<name>/',
   shared: '统一装到 ~/.agents/{skills,agents,plugins}/<name>/，供多个 harness 共享',
@@ -27,6 +31,8 @@ export function resolveTargetBase(target, { home = os.homedir(), dir } = {}) {
   switch (target) {
     case 'dsh':
       return path.join(baseHome, '.dsh');
+    case 'dsh-agent':
+      return dshHome(baseHome);
     case 'claude':
       return path.join(baseHome, '.claude');
     case 'codex':
@@ -46,6 +52,18 @@ export function resolveTargetBase(target, { home = os.homedir(), dir } = {}) {
 
 export function installDestination(kind, name, { target, home, dir } = {}) {
   const base = resolveTargetBase(target, { home, dir });
+  if (target === 'dsh-agent') {
+    if (kind !== 'agent') {
+      throw badRequest('安装目标 dsh-agent 只适用于 agent 包（会生成 DSH agent-preset 片段）');
+    }
+    const baseDir = path.join(base, 'agentdock', 'presets');
+    return {
+      layout: 'dsh-preset',
+      baseDir,
+      absolutePath: path.join(baseDir, `${name}.patch.yml`),
+      mainFile: 'agent.md',
+    };
+  }
   if (kind === 'agent' && target === 'claude') {
     return {
       layout: 'file',
@@ -69,6 +87,23 @@ function writeContent(file) {
   return Buffer.from(String(file.content ?? ''), 'utf8');
 }
 
+function manifestFile(bundle, manifestPath, targetPath = path.basename(manifestPath)) {
+  return {
+    path: manifestPath,
+    targetPath,
+    encoding: 'utf8',
+    content: `${JSON.stringify(
+      {
+        package: { kind: bundle.kind, name: bundle.name, version: bundle.version },
+        installedAt: nowIso(),
+        source: 'agentdock',
+      },
+      null,
+      2,
+    )}\n`,
+  };
+}
+
 /**
  * 规划一次安装（不写盘）。
  * @param {{kind:string,name:string,version:string,files:Array<{path:string,content:string,encoding:string}>}} bundle
@@ -80,6 +115,28 @@ export function planInstall(bundle, { target, home = os.homedir(), dir, force = 
   const dest = installDestination(bundle.kind, bundle.name, { target, home, dir });
   const files = [];
   const notes = [];
+
+  if (dest.layout === 'dsh-preset') {
+    const preset = renderPresetPatch(bundle);
+    if (!force && fs.existsSync(dest.absolutePath)) {
+      throw conflict(`安装目标已存在：${dest.absolutePath}（确认覆盖请加 --force）`);
+    }
+    files.push({
+      path: dest.absolutePath,
+      targetPath: `${bundle.name}.patch.yml`,
+      content: preset.yaml,
+      encoding: 'utf8',
+    });
+    const manifestPath = path.join(dest.baseDir, `${bundle.name}.agentdock.json`);
+    files.push(manifestFile(bundle, manifestPath));
+    notes.push(
+      '已生成 DSH agent-preset 片段；片段本身不会自动生效。',
+      '并入 profile：追加到 $DSH_HOME/profiles/<profile>/cordis.patch.yml 顶层数组，或重跑并加 --profile <name> 自动追加（按标记替换，可重复执行）。',
+      '临时挂载：dsh <profile> --patch <片段文件>；重启 DSH 后在 Settings → Agent presets 选择该 preset。',
+      'preset 不携带模型；模型由会话/默认模型决定。',
+    );
+    return { target, dest, files, notes, manifestPath, force, preset };
+  }
 
   if (dest.layout === 'file') {
     const main =
@@ -114,20 +171,7 @@ export function planInstall(bundle, { target, home = os.homedir(), dir, force = 
     dest.layout === 'file'
       ? path.join(dest.baseDir, `${bundle.name}.agentdock.json`)
       : path.join(dest.absolutePath, '.agentdock-install.json');
-  files.push({
-    path: manifestPath,
-    targetPath: path.relative(dest.baseDir, manifestPath),
-    encoding: 'utf8',
-    content: `${JSON.stringify(
-      {
-        package: { kind: bundle.kind, name: bundle.name, version: bundle.version },
-        installedAt: nowIso(),
-        source: 'agentdock',
-      },
-      null,
-      2,
-    )}\n`,
-  });
+  files.push(manifestFile(bundle, manifestPath, path.relative(dest.baseDir, manifestPath)));
 
   return { target, dest, files, notes, manifestPath, force };
 }
@@ -154,7 +198,7 @@ export function summarizePlan(plan, { home = os.homedir() } = {}) {
     const base = home || os.homedir();
     return absolute.startsWith(base) ? `~${absolute.slice(base.length)}` : absolute;
   };
-  return {
+  const summary = {
     target: plan.target,
     layout: plan.dest.layout,
     baseDir: strip(plan.dest.baseDir),
@@ -163,6 +207,15 @@ export function summarizePlan(plan, { home = os.homedir() } = {}) {
     files: plan.files.map((file) => ({ path: strip(file.path), targetPath: file.targetPath })),
     notes: plan.notes,
   };
+  if (plan.preset) {
+    summary.preset = {
+      id: plan.preset.presetId,
+      title: plan.preset.title,
+      pluginIds: plan.preset.plugins.map((plugin) => plugin.id),
+      warnings: plan.preset.warnings,
+    };
+  }
+  return summary;
 }
 
 export function listTargets({ home = os.homedir() } = {}) {
@@ -170,7 +223,12 @@ export function listTargets({ home = os.homedir() } = {}) {
     id,
     label: TARGET_LABEL[id],
     note: TARGET_NOTE[id],
-    baseDir: id === 'dir' ? null : resolveTargetBase(id, { home }),
+    baseDir:
+      id === 'dir'
+        ? null
+        : id === 'dsh-agent'
+          ? path.join(resolveTargetBase(id, { home }), 'agentdock', 'presets')
+          : resolveTargetBase(id, { home }),
   }));
 }
 

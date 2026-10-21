@@ -173,6 +173,7 @@ data/
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
 | `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished`） |
 | `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
+| `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/auth.mjs` | 用户/令牌/角色 | `createUserDirectory`、`tokenFromRequest` |
 | `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
@@ -197,7 +198,8 @@ data/
 1. `resolveTargetBase(target, {home, dir})`：目标根目录（如 `~/.dsh`、`~/.claude`、自定义 dir）。
 2. `installDestination(kind, name, {target, home, dir})`：最终落点布局：
    - `layout: 'dir'`：`<base>/skills|agents|plugins/<name>/`，包内相对路径平铺；
-   - `layout: 'file'`：Claude agent 单文件 `<base>/agents/<name>.md`，其余文件进 `<name>.agentdock/` sidecar，额外写 `<name>.agentdock.json`。
+   - `layout: 'file'`：Claude agent 单文件 `<base>/agents/<name>.md`，其余文件进 `<name>.agentdock/` sidecar，额外写 `<name>.agentdock.json`；
+   - `layout: 'dsh-preset'`：只接受 agent 包，渲染成单个 `<base>/agentdock/presets/<name>.patch.yml`（plan 里带 `preset` 元数据：presetId、插件行、告警），另写 `<name>.agentdock.json`。
 3. `planInstall()`：生成 `{dest, files[{path, targetPath, content, encoding}], force, notes}`；`applyInstall()` 原子写入（`.tmp` → rename）并写清单。
 
 冲突策略：目标已存在 → `AppError(409)`；`force` 时只覆盖同名文件，不清理旧目录中的多余文件。
@@ -207,10 +209,53 @@ data/
 | 能力类型 | DSH 现状 | AgentDock 的桥接 |
 | --- | --- | --- |
 | skill | `dsh-skill-filesystem` 扫描 `~/.dsh/skills`、`~/.agents/skills`、项目 `.dsh/skills` | 安装 target `dsh` / `shared`，落地即被发现 |
-| agent | DSH 没有 `~/.claude/agents` 等价目录；角色由 **agent preset**（`@deepseek-ai/dsh-agent-preset` 的 `id + plugins` 组合）表达 | 两条路：① `import-claude` 把 md 包装成 agent 包后，用 Creator 模式转写为 preset；② 直接作为派工 prompt 传给 `dsh-tool-subagent` |
+| agent | DSH 没有 `~/.claude/agents` 等价目录；角色由 **agent preset**（`@deepseek-ai/dsh-agent-preset` 的 `id + plugins` 组合）表达 | `dsh-agent` 安装目标把 agent 包转成 preset 片段（`- insert:` 条目）：`tools` → 插件行，正文 → `@deepseek-ai/dsh-persona` 的 `prefix`，`skills` → `skill-filesystem` + `tool-skill`。也支持 `import-claude --presets` 批量生成 |
 | plugin | DSH 插件是 Cordis npm 包（`dsh plugin add <pkg>`） | AgentDock 的 plugin 是**一包多能力**的容器；真正给 DSH 用的插件需另行包成 Cordis 包，本平台负责登记与治理 |
 
-未来可新增安装目标 `dsh-agent`：把 agent 包里的 `tools/model/prompt` 组合成 `@deepseek-ai/dsh-agent-preset` 的 preset 片段（bundle patch），由用户合并进其 profile。
+### 7.1 agent 包 → DSH preset 的映射规则
+
+DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（顶层 YAML 数组，元素为 loader patch 条目；`insert` 追加条目，其余 patch 只替换给出的字段、不深合并）。因此 AgentDock 统一生成 `- insert:` 形式：
+
+```yaml
+- insert:
+    - id: preset-agentdock-code-reviewer
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: agentdock-code-reviewer
+        name: "AgentDock · code-reviewer"
+        description: "…"
+        order: 50
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                <agent.md 正文>
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+```
+
+| agent.md 输入 | 生成的插件行 |
+| --- | --- |
+| `tools` 含 Read/Write/Edit/ApplyPatch 等 | `@deepseek-ai/dsh-tool-fs` |
+| `tools` 含 Grep/Glob/LS/Find | `@deepseek-ai/dsh-tool-fs-search`（`sampleOverCapGlobResults: false`） |
+| `tools` 含 Bash/Shell | `@deepseek-ai/dsh-tool-bash` |
+| `tools` 含 WebFetch/WebSearch | `@deepseek-ai/dsh-tool-web` |
+| `tools` 含 TodoWrite | `@deepseek-ai/dsh-tool-todo` |
+| `tools` 含 Skill 或 frontmatter `skills` | `@deepseek-ai/dsh-skill-filesystem` + `@deepseek-ai/dsh-tool-skill` |
+| 正文 | `@deepseek-ai/dsh-persona` 的 `config.prefix`（YAML 块标量） |
+| 固定前置 | `@deepseek-ai/dsh-agent-instructions`（maxBytes 65536）+ `@deepseek-ai/dsh-time-context` |
+
+`model` 无法映射：DSH preset 不带模型，模型由会话或 `agent-default-model` 决定，渲染时给出告警。`tools` 里的 `Task`（子代理）等需要额外组合 provider 的工具只告警不生成，避免生成无法启动的 preset。
+
+片段不会自动生效，两种启用方式：
+
+1. 临时挂载：`dsh <profile> --patch <片段文件>`；
+2. 永久合并：`--profile <name>` 让 AgentDock 以 `# >>> agentdock preset <id>` / `# <<<` 标记块追加进 `~/.dsh/profiles/<name>/cordis.patch.yml`，重复执行按标记替换（幂等），不碰文件里的其他内容。
+
+**验证方式**：`DSH_HOME=/tmp/dshhome dsh <profile> --patch <片段> --dump-config`（退出码 0 且输出里出现 `preset-<id>` 即视为可组合）。
 
 ## 8. 关键取舍与演进
 
@@ -225,7 +270,7 @@ data/
 
 ## 9. 测试策略
 
-- **单元测试**：yaml / bundle / validate / scan / targets——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段）。
+- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。

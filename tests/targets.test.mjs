@@ -107,3 +107,62 @@ test('目标解析与校验', () => {
   assert.deepEqual(targets.map((target) => target.id), TARGET_IDS);
   assert.equal(targets.find((target) => target.id === 'dir').baseDir, null);
 });
+
+test('agent 生成 DSH preset 片段安装到 ~/.dsh/agentdock/presets', (t) => {
+  const home = withHome(t);
+  const bundle = {
+    kind: 'agent',
+    name: 'reviewer',
+    version: '0.1.0',
+    description: '评审 agent',
+    files: [
+      {
+        path: 'agent.md',
+        content: '---\nname: reviewer\ndescription: 评审 agent\ntools: Read, Bash\n---\n\n你是评审。\n',
+        encoding: 'utf8',
+      },
+    ],
+  };
+  const plan = planInstall(bundle, { target: 'dsh-agent', home });
+  assert.equal(plan.dest.layout, 'dsh-preset');
+  assert.equal(plan.dest.absolutePath, path.join(home, '.dsh', 'agentdock', 'presets', 'reviewer.patch.yml'));
+  assert.equal(plan.preset.presetId, 'agentdock-reviewer');
+  const main = plan.files.find((file) => file.path === plan.dest.absolutePath);
+  assert.ok(main.content.includes('preset-agentdock-reviewer'));
+  assert.ok(main.content.includes('- insert:'));
+  assert.ok(plan.notes.some((note) => note.includes('重启 DSH')));
+
+  const result = applyInstall(plan);
+  assert.equal(result.target, 'dsh-agent');
+  assert.ok(fs.existsSync(path.join(home, '.dsh', 'agentdock', 'presets', 'reviewer.patch.yml')));
+  assert.ok(fs.existsSync(path.join(home, '.dsh', 'agentdock', 'presets', 'reviewer.agentdock.json')));
+
+  const summary = summarizePlan(plan, { home });
+  assert.ok(summary.absolutePath.startsWith('~/.dsh/agentdock/presets/'));
+  assert.equal(summary.preset.id, 'agentdock-reviewer');
+  assert.ok(summary.preset.pluginIds.includes('tool-fs'));
+
+  assert.throws(
+    () => planInstall(bundle, { target: 'dsh-agent', home }),
+    (error) => error instanceof AppError && error.status === 409,
+  );
+  assert.equal(planInstall(bundle, { target: 'dsh-agent', home, force: true }).force, true);
+});
+
+test('dsh-agent 只接受 agent 包', (t) => {
+  const home = withHome(t);
+  assert.throws(
+    () => planInstall(skillBundle(), { target: 'dsh-agent', home }),
+    (error) => error instanceof AppError && error.status === 400 && error.message.includes('agent'),
+  );
+});
+
+test('listTargets 包含 dsh-agent', () => {
+  const targets = listTargets({ home: '/tmp/h' });
+  assert.deepEqual(targets.map((target) => target.id), TARGET_IDS);
+  assert.equal(
+    targets.find((target) => target.id === 'dsh-agent').baseDir,
+    path.join('/tmp/h', '.dsh', 'agentdock', 'presets'),
+  );
+  assert.equal(resolveTargetBase('dsh-agent', { home: '/tmp/h' }), path.join('/tmp/h', '.dsh'));
+});

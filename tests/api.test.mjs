@@ -236,3 +236,56 @@ test('审核拒绝后版本不可安装、可重新提交覆盖', async (t) => {
   const market = await request('GET', '/packages');
   assert.equal(market.data.total, 1);
 });
+
+test('dsh-agent 目标：agent 包装成 DSH preset 片段，非 agent 包被拒绝', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.close());
+  const { request, tokens, home } = server;
+
+  const agentPayload = {
+    kind: 'agent',
+    name: 'dsh-reviewer',
+    version: '0.1.0',
+    description: '评审 agent',
+    files: [
+      {
+        path: 'agent.md',
+        encoding: 'utf8',
+        content: '---\nname: dsh-reviewer\ndescription: 评审 agent\ntools: Read, Grep, Bash\n---\n\n你是评审。\n',
+      },
+    ],
+  };
+  const created = await request('POST', '/packages', { token: tokens.publisher, body: agentPayload });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  await request('POST', '/review', {
+    token: tokens.reviewer,
+    body: { kind: 'agent', name: 'dsh-reviewer', version: '0.1.0', decision: 'approve' },
+  });
+
+  const installed = await request('POST', '/install', {
+    token: tokens.publisher,
+    body: { kind: 'agent', name: 'dsh-reviewer', version: '0.1.0', target: 'dsh-agent' },
+  });
+  assert.equal(installed.status, 201, JSON.stringify(installed.data));
+  assert.equal(installed.data.layout, 'dsh-preset');
+  const fragmentPath = path.join(home, '.dsh', 'agentdock', 'presets', 'dsh-reviewer.patch.yml');
+  assert.equal(installed.data.absolutePath, fragmentPath);
+  const fragment = fs.readFileSync(fragmentPath, 'utf8');
+  assert.match(fragment, /preset-agentdock-dsh-reviewer/);
+  assert.match(fragment, /name: '@deepseek-ai\/dsh-tool-fs'/);
+  assert.match(fragment, /name: '@deepseek-ai\/dsh-tool-bash'/);
+  assert.ok(fs.existsSync(path.join(home, '.dsh', 'agentdock', 'presets', 'dsh-reviewer.agentdock.json')));
+
+  // skill 包不能装成 dsh-agent
+  const skill = await request('POST', '/packages', { token: tokens.publisher, body: skillPayload() });
+  assert.equal(skill.status, 201);
+  await request('POST', '/review', {
+    token: tokens.reviewer,
+    body: { kind: 'skill', name: 'demo-skill', version: '0.1.0', decision: 'approve' },
+  });
+  const rejected = await request('POST', '/install', {
+    token: tokens.publisher,
+    body: { kind: 'skill', name: 'demo-skill', version: '0.1.0', target: 'dsh-agent' },
+  });
+  assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+});
