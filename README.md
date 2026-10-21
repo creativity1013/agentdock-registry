@@ -307,6 +307,34 @@ agentdock import-claude --presets-dir ./presets      # 片段写到自定义目�
 
 生成的片段可直接用 DSH 验证：`DSH_HOME=/tmp/dshhome dsh <profile> --patch <片段> --dump-config`。`name` 重复的 md 会被跳过并提示，避免多个文件映射到同一个 preset id。DSH 目前没有 `~/.claude/agents` 原生目录支持：安装到 `claude` 目标即还原为 Claude Code 可识别的 md；要在 DSH 中使用，用 `--target dsh-agent` 或 `import-claude --presets` 生成 preset 片段（原理见 `docs/ARCHITECTURE.md` 的「与 DSH 集成」）。
 
+## 部署（Docker / CI）
+
+### Docker
+
+```bash
+docker build -t agentdock:0.1.0 .
+docker run -d --name agentdock -p 7788:7788 -v agentdock-data:/data agentdock:0.1.0
+docker exec agentdock cat /data/BOOTSTRAP-TOKENS.txt   # 首次启动生成的 admin/reviewer/publisher 令牌
+```
+
+或直接 `docker compose up -d --build`（见 `docker-compose.yml`）。镜像要点：
+
+- `node:24-alpine` + `tini`，以非 root 用户 `node` 运行；
+- 数据全部落在 `/data`（声明为 VOLUME），内置 `AGENTDOCK_HOST=0.0.0.0`、`AGENTDOCK_DATA=/data`；
+- 自带 `HEALTHCHECK`，命中 `/api/v1/health`；
+- 运行时镜像只含 `src/ web/ cli/ server.mjs package.json`，不含 tests/scripts/examples/docs。
+
+生产注意：默认没有 TLS 与 SSO，请放在反向代理（HTTPS + 认证）之后，并限制 `/api/v1/admin/*` 入口；`/data` 需持久化并备份（`db.json`、`packages/`、`audit.log`、`users.json`）。
+
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` 在 push / pull request 时跑两个 job：
+
+1. **test**：Node 20 / 22 / 24 矩阵，依次执行 `npm test`、`npm run smoke`、逐个校验 `examples/*`、对所有 `.mjs` 做 `node --check`；
+2. **docker**：`docker build` 后启动容器并轮询 `/api/v1/health`，失败时打印容器日志。
+
+项目零第三方依赖，因此 CI 不需要 `npm install`，也没有 lockfile 需要维护。
+
 ## 项目结构
 
 ```
@@ -327,9 +355,12 @@ agentdock/
 │   ├── config.mjs           # 配置与数据目录
 │   ├── errors.mjs / util.mjs / yaml.mjs
 ├── web/                     # 零依赖市场 UI（原生 JS）
+├── Dockerfile               # 生产镜像（node:24-alpine + tini，非 root）
+├── docker-compose.yml       # 单机部署（端口 7788 + /data 卷）
+├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（33 个用例）
+├── tests/                   # node:test 测试（45 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -341,7 +372,7 @@ npm run smoke             # 端到端：真实启动服务 + CLI + 落盘安装
 npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --approve）
 ```
 
-`npm run smoke` 会在临时目录启动一个隔离实例，覆盖完整闭环，最后输出 `SMOKE OK` 与统计信息，不污染本地 `data/`。
+`npm run smoke` 会在临时目录启动一个隔离实例，覆盖完整闭环，最后输出 `SMOKE OK` 与统计信息，不污染本地 `data/`。CI 配置见 `.github/workflows/ci.yml`，本地等价命令即上面三条。
 
 ## 设计取舍
 

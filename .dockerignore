@@ -1,0 +1,14 @@
+# 运行时镜像不需要的内容
+.git
+.gitignore
+.github
+data
+node_modules
+coverage
+tests
+scripts
+examples
+docs
+*.log
+*.tmp
+.DS_Store

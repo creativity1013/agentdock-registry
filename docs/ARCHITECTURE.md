@@ -274,3 +274,15 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。
+
+## 10. 部署形态
+
+| 形态 | 入口 | 说明 |
+| --- | --- | --- |
+| 本地开发 | `node server.mjs` / `npm start` | 默认 `127.0.0.1:7788`，数据在仓库内 `data/`（git 忽略） |
+| 单机容器 | `Dockerfile` + `docker-compose.yml` | `node:24-alpine` + tini，非 root `node` 用户；`/data` 为唯一持久化卷；HEALTHCHECK 打 `/api/v1/health` |
+| CI | `.github/workflows/ci.yml` | Node 20/22/24 矩阵跑 `npm test` / `npm run smoke` / 示例校验 / `node --check`；独立 job 构建镜像并做容器健康检查 |
+
+容器内配置全部走环境变量（`AGENTDOCK_HOST`、`AGENTDOCK_PORT`、`AGENTDOCK_DATA`、`AGENTDOCK_SCAN_BLOCK`、`AGENTDOCK_PUBLIC_URL`），与 CLI 的 `~/.agentdock/config.json` 互不依赖。生产部署应置于反向代理之后，由代理提供 TLS 与访问控制，并限制 `/api/v1/admin/*`。
+
+存储侧只需要备份 `/data`：`db.json`（热索引）、`users.json`（令牌哈希）、`audit.log`（append-only）、`packages/`（版本内容与 meta.json）。迁移时只要有 `packages/` 即可重建版本内容，`db.json` 可用 `meta.json` 人工重建（自动重建列入 roadmap）。

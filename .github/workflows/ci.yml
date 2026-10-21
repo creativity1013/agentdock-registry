@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 单元 + 接口测试
+        run: npm test
+
+      - name: 端到端冒烟（真实服务 + CLI 子进程 + 落盘）
+        run: npm run smoke
+
+      - name: 校验示例能力包
+        run: |
+          for pkg in examples/*/; do
+            node cli/agentdock.mjs verify "$pkg"
+          done
+
+      - name: 语法检查（mjs）
+        run: |
+          for file in $(git ls-files '*.mjs'); do node --check "$file"; done
+
+  docker:
+    name: docker build + health check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建镜像
+        run: docker build -t agentdock:ci .
+
+      - name: 启动容器并等待健康检查
+        run: |
+          docker run -d --name agentdock-ci -p 7788:7788 agentdock:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:7788/api/v1/health; then
+              echo ""
+              echo "容器健康检查通过"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs agentdock-ci
+          exit 1
+
+      - name: 容器日志与清理
+        if: always()
+        run: |
+          docker logs agentdock-ci || true
+          docker rm -f agentdock-ci || true

@@ -1,0 +1,24 @@
+services:
+  agentdock:
+    build: .
+    image: agentdock:latest
+    container_name: agentdock
+    ports:
+      - "7788:7788"
+    environment:
+      # 高危扫描发现默认阻断；设为 medium 更严格，none 关闭阻断（不建议）
+      AGENTDOCK_SCAN_BLOCK: high
+      # 反向代理后对外地址（用于页面/文档展示）
+      # AGENTDOCK_PUBLIC_URL: https://agentdock.example.com
+    volumes:
+      - agentdock-data:/data
+    restart: unless-stopped
+    # 镜像自带 HEALTHCHECK；如需调参可在此覆盖
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7788/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  agentdock-data:
