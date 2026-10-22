@@ -67,6 +67,9 @@ agentdock login --url http://127.0.0.1:7788 --token <token>
 # 本地校验（不联网）：目录 → 归一化 → 结构校验 → 安全扫描
 agentdock verify examples/skill-code-reviewer
 agentdock verify examples/agent-code-reviewer --json
+agentdock verify examples/bundles/skill-code-reviewer.zip      # zip / tar.gz / 单文件 md 同样可校验
+agentdock publish examples/bundles/plugin-ops-kit.zip --version 0.1.0
+agentdock publish examples/bundles/agent-code-reviewer.md
 
 # 发布 / 审核 / 上架
 agentdock publish examples/skill-code-reviewer --version 0.1.0
@@ -425,6 +428,33 @@ CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
 自动审批策略持久化在 `data/policy.json`（`PUT /api/v1/policy` 或 `agentdock policy set` 写入，重启后仍生效）；**策略按租户隔离**：文件结构为 `{ "tenants": { "<租户>": { autoApprove, quota } } }`，未配置的租户回落到 `default` 租户策略；`GET/PUT /api/v1/policy` 读写当前令牌所属租户的策略（兼容旧的单策略文件，加载时自动归入 `default`）。每个版本的 SBOM 随发布写盘到 `data/packages/<kind>/<name>/<version>/sbom.json`。
 
+## 多样化导入格式
+
+除了 AgentDock 自己的 JSON bundle，导入入口（Web「导入能力包 / 导入文件夹」、`agentdock publish <文件>`、`POST /api/v1/import`）还接受市场上常见的分发格式：
+
+| 格式 | 说明 | 类型/名称来源 |
+|---|---|---|
+| 目录 | 直接发布一个本地目录（传统方式） | 根目录 `SKILL.md` / `agent.md` / `plugin.json` |
+| JSON bundle | `{kind,name,version,files:[…]}` | JSON 自带字段 |
+| 文件夹上传 | Web 选择整个文件夹（`webkitdirectory`），浏览器打包成 `{files:[…]}` | 同上，服务端自动识别 |
+| `.zip` | Agent Skills 市场、GitHub「Download ZIP」等常见打包 | 自动剥离 GitHub 的单层根目录；识别根目录清单 |
+| `.tar.gz` / `.tgz` / `.tar` | npm/脚本发布物常用格式 | 同上 |
+| 单文件 `.md` | Agent Skills / Claude Code agent 的裸文件 | frontmatter 有 `tools`/`model` 判定为 agent，否则 skill |
+| 单文件 `plugin.json` | 只有清单的 plugin | manifest 字段 |
+| GitHub 仓库 | Web「从远端仓库导入」或 CLI `sync import github` | 仓库内目录内容 |
+| MCP registry | CLI `sync import mcp <name>` | registry 的 server 元数据 |
+
+```bash
+# 生成演示用的归档与单文件（zip / tar.gz / md）
+node scripts/make-example-archives.mjs
+
+agentdock publish examples/bundles/skill-code-reviewer.zip
+agentdock publish examples/bundles/plugin-ops-kit.tar.gz --version 0.1.1
+agentdock publish examples/bundles/agent-code-reviewer.md --dry-run
+```
+
+安全与限制：归档解压总上限 8MB、单文件 4MB、最多 500 个条目，并检查压缩比防 zip bomb；隐藏目录（`.git`/`.github`/`__MACOSX` 等）、`node_modules`、`..` 与绝对路径一律丢弃；gz 解压使用 `maxOutputLength` 限流。解析失败返回 422，其余校验/扫描/审核流程与普通发布完全一致。原始文件不落盘，只在内存中转换为 bundle 后走统一 pipeline。
+
 ## 导入 Claude Code agents
 
 ```bash
@@ -675,6 +705,8 @@ agentdock/
 │   ├── dsh-preset.mjs       # agent 包 → DSH agent-preset 片段（tools 映射、profile 合并）
 │   ├── signing.mjs          # ed25519 内容签名/验签（审核通过即签名，公钥公开）+ 发布者签名
 │   ├── transparency.mjs     # 可验证透明日志（哈希链 + Merkle 树 + 包含证明）
+│   ├── archive.mjs          # 零依赖 ZIP / TAR(.gz) 读取与安全限制
+│   ├── import.mjs           # 多样化导入：格式识别 → 文件清单/元数据推断 → bundle payload
 │   ├── registry.mjs         # 外部 registry 互操作（GitHub / MCP registry 导入 + 市场目录导出）
 │   ├── sbom.mjs             # SBOM 生成（文件哈希 + 工具/MCP/技能组件 + digest）
 │   ├── policy.mjs           # 多租户策略容器 + 配额（归一化/校验/规则求值）
@@ -694,9 +726,9 @@ agentdock/
 ├── Dockerfile               # 生产镜像（node:24-alpine + tini，非 root）
 ├── docker-compose.yml       # 单机部署（端口 7788 + /data 卷）
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
-├── examples/                # 三类示例能力包
-├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（133 个用例）
+├── examples/                # 三类示例能力包 + examples/bundles（zip/tar.gz/md 导入示例）
+├── scripts/                 # smoke + 批量发布示例 + 生成导入示例归档
+├── tests/                   # node:test 测试（144 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 

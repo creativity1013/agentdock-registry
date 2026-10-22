@@ -58,7 +58,8 @@
       AgentDock MVP · 本地优先 · 能力包版本不可变 · 发布需审核 · 操作留痕
     </footer>
 
-    <input type="file" id="publish-file" accept="application/json,.json" hidden />
+    <input type="file" id="publish-file" accept=".json,.zip,.tgz,.tar,.tar.gz,.md,.markdown,application/json,application/zip,application/gzip,text/markdown" hidden />
+    <input type="file" id="publish-folder" webkitdirectory directory multiple hidden />
     <script src="/app.js"></script>
   </body>
 </html>

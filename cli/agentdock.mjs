@@ -7,6 +7,7 @@ import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { readBundleFromDirectory, KINDS, KIND_LABEL } from '../src/bundle.mjs';
 import { analyzeInput } from '../src/pipeline.mjs';
+import { buildImportPayload } from '../src/import.mjs';
 import { parseFrontmatter } from '../src/yaml.mjs';
 import {
   planInstall,
@@ -42,9 +43,10 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock login [--url <url>] [--token <token>]  登录并保存令牌到 ~/.agentdock/config.json
   agentdock whoami                                 查看当前用户
 
-  agentdock publish <目录> [--type skill|agent|plugin] [--version 0.1.0] [--name <name>] [--dry-run]
+  agentdock publish <目录|文件> [--type skill|agent|plugin] [--version 0.1.0] [--name <name>] [--dry-run]
+                    支持目录 / .json bundle / .zip / .tar.gz / .md（单文件技能或 agent）/ plugin.json
                     [--key <私钥 PEM>] [--key-name <名字>]  附加发布者内容签名（TOFU 自动注册公钥）
-  agentdock verify <目录>                          本地校验 + 安全扫描，不提交
+  agentdock verify <目录|文件>                     本地校验 + 安全扫描，不提交（格式同 publish）
   agentdock import-claude [--dir ~/.claude/agents] [--publish] [--presets] [--presets-dir <目录>] [--profile <profile>]
                                                    导入 Claude Code agent；可同时生成 DSH agent-preset 片段
 
@@ -269,6 +271,47 @@ function loadBundleFromDir(dir, flags) {
   return { files, warnings, meta };
 }
 
+async function loadBundleFromPath(target, flags) {
+  if (!target) throw new Error('缺少文件或目录参数');
+  let stats;
+  try {
+    stats = fs.statSync(target);
+  } catch (error) {
+    throw new Error(`路径不存在或不可读：${target}`);
+  }
+  const overrides = {
+    kind: flags.type ? String(flags.type) : undefined,
+    name: flags.name ? String(flags.name) : undefined,
+    version: flags.version ? String(flags.version) : undefined,
+    description: flags.description ? String(flags.description) : undefined,
+    tags: flags.tags ? String(flags.tags).split(',').map((item) => item.trim()).filter(Boolean) : undefined,
+  };
+  if (stats.isDirectory()) {
+    const loaded = loadBundleFromDir(target, flags);
+    return { ...loaded, format: 'directory' };
+  }
+  const buffer = fs.readFileSync(target);
+  const built = await buildImportPayload({
+    filename: path.basename(target),
+    contentType: '',
+    buffer,
+    overrides,
+  });
+  if (!built.payload) throw new Error('导入文件解析失败：没有生成包内容');
+  return {
+    files: built.payload.files,
+    warnings: [],
+    meta: {
+      kind: built.payload.kind,
+      name: built.payload.name,
+      version: built.payload.version,
+      description: built.payload.description || '',
+      tags: built.payload.tags || [],
+    },
+    format: built.format,
+  };
+}
+
 function printAnalysis(report) {
   const lines = [];
   if (report.summary) {
@@ -382,8 +425,9 @@ async function cmdWhoami(flags) {
 }
 
 async function cmdPublish(positionals, flags) {
-  const dir = positionals[0];
-  const { files, warnings, meta } = loadBundleFromDir(dir, flags);
+  const target = positionals[0];
+  const { files, warnings, meta, format } = await loadBundleFromPath(target, flags);
+  if (format && format !== 'directory') console.log(`▸ 已解析 ${format} 导入格式`);
   const payload = {
     kind: meta.kind,
     name: meta.name,
@@ -434,8 +478,9 @@ async function cmdPublish(positionals, flags) {
 }
 
 async function cmdVerify(positionals, flags) {
-  const dir = positionals[0];
-  const { files, warnings, meta } = loadBundleFromDir(dir, flags);
+  const target = positionals[0];
+  const { files, warnings, meta, format } = await loadBundleFromPath(target, flags);
+  if (format && format !== 'directory') console.log(`▸ 已解析 ${format} 导入格式`);
   const report = analyzeInput(
     { kind: meta.kind, name: meta.name, version: meta.version, description: meta.description, tags: meta.tags, files },
     { scanBlock: flags['scan-block'] || 'high' },
@@ -1537,6 +1582,7 @@ async function main() {
     case 'whoami':
       return cmdWhoami(flags);
     case 'publish':
+    case 'import':
       return cmdPublish(positionals, flags);
     case 'verify':
       return cmdVerify(positionals, flags);

@@ -261,6 +261,8 @@ data/
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
 | `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
+| `src/archive.mjs` | 零依赖归档读取：ZIP（stored/deflate）与 TAR/TAR.GZ，含条目数/体积/压缩比/路径限制 | `readZip`、`readTarGz`、`readArchive`、`normalizeArchivePath`、`stripCommonPrefix` |
+| `src/import.mjs` | 多样化导入归一化：格式识别、单文件 md/plugin.json 包装、元数据推断，统一产出 bundle payload | `buildImportPayload`、`wrapMarkdown` |
 | `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、GitHub 推送、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`pushToGitHub`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
 | `src/quality.mjs` | 质量分级推导：community / verified / official（由签名、审核与扫描元数据计算，不落库） | `qualityOf`、`QUALITY_LABEL`、`QUALITY_LEVELS` |
 | `src/sbom.mjs` | 版本 SBOM 生成与 digest（文件哈希 + 工具/MCP/技能组件） | `buildSbom`、`sbomDigest`、`SBOM_SCHEMA` |

@@ -1,0 +1,117 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { startTestServer } from './helpers.mjs';
+import { makeZip, makeTarGz, SKILL_MD, AGENT_MD } from './helpers-archive.mjs';
+
+let server;
+let publisher;
+
+before(async () => {
+  server = await startTestServer();
+  publisher = server.tokens.publisher;
+});
+
+after(async () => {
+  await server.close();
+});
+
+async function upload(filename, body, contentType, { token = publisher, query = '' } = {}) {
+  const response = await fetch(`${server.url}/api/v1/import?filename=${encodeURIComponent(filename)}${query}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': contentType },
+    body,
+  });
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
+test('导入 ZIP：自动识别 skill 并进入待审核', async () => {
+  const zip = makeZip([
+    { path: 'my-skill/SKILL.md', content: SKILL_MD },
+    { path: 'my-skill/notes.md', content: '# notes' },
+  ]);
+  const { status, data } = await upload('my-skill.zip', zip, 'application/zip', { query: '&version=0.1.1' });
+  assert.equal(status, 201);
+  assert.equal(data.format, 'zip');
+  assert.equal(data.package.kind, 'skill');
+  assert.equal(data.package.name, 'imported-skill');
+  assert.equal(data.version.status, 'pending');
+  assert.equal(data.version.version, '0.1.1');
+});
+
+test('导入 tar.gz：plugin 目录带 plugin.json 自动识别并发布', async () => {
+  const tgz = makeTarGz([
+    {
+      path: 'ops-kit/plugin.json',
+      content: JSON.stringify({ name: 'ops-kit', version: '0.2.0', description: '运维工具箱', skills: ['skills/check'] }),
+    },
+    { path: 'ops-kit/skills/check/SKILL.md', content: '---\nname: check\ndescription: 检查\ntags:\n  - ops\n---\n\n# check\n' },
+  ]);
+  const { status, data } = await upload('ops-kit.tar.gz', tgz, 'application/gzip', { query: '&version=0.2.0' });
+  assert.equal(status, 201);
+  assert.equal(data.format, 'tar.gz');
+  assert.equal(data.package.kind, 'plugin');
+  assert.equal(data.package.name, 'ops-kit');
+  assert.equal(data.version.version, '0.2.0');
+});
+
+test('导入单文件 markdown：默认技能；带 tools 的 md 自动成为 agent', async () => {
+  const skill = await upload('release-check.md', SKILL_MD, 'text/markdown', { query: '&version=0.1.2' });
+  assert.equal(skill.status, 201);
+  assert.equal(skill.data.package.kind, 'skill');
+  assert.equal(skill.data.package.name, 'imported-skill');
+
+  const agent = await upload('agent.md', AGENT_MD, 'text/markdown', { query: '&version=0.1.3' });
+  assert.equal(agent.status, 201);
+  assert.equal(agent.data.package.kind, 'agent');
+  assert.equal(agent.data.package.name, 'imported-agent');
+});
+
+test('文件夹上传（files JSON）：自动识别 skill', async () => {
+  const response = await fetch(`${server.url}/api/v1/import?filename=my-folder.json&version=0.1.4`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: 'SKILL.md', content: SKILL_MD, encoding: 'utf8' },
+        { path: 'extra/readme.md', content: '# hi', encoding: 'utf8' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.format, 'files-json');
+  assert.equal(data.package.kind, 'skill');
+  assert.equal(data.package.name, 'imported-skill');
+});
+
+test('dryRun：只预览不落库', async () => {
+  const before = await fetch(`${server.url}/api/v1/packages?pageSize=100`).then((res) => res.json());
+  const response = await fetch(`${server.url}/api/v1/import?dryRun=1&filename=dry.zip&name=dry-skill&version=0.1.0`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/zip' },
+    body: makeZip([{ path: 'SKILL.md', content: SKILL_MD.replace('name: imported-skill', 'name: dry-skill') }]),
+  });
+  const dry = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.valid, true);
+  const after = await fetch(`${server.url}/api/v1/packages?pageSize=100`).then((res) => res.json());
+  assert.equal(after.total, before.total);
+});
+
+test('错误处理：匿名 401、非法归档 422、路径穿越被过滤后无文件 422', async () => {
+  const anon = await fetch(`${server.url}/api/v1/import?filename=x.zip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/zip' },
+    body: makeZip([{ path: 'SKILL.md', content: SKILL_MD }]),
+  });
+  assert.equal(anon.status, 401);
+
+  const bad = await upload('bad.zip', Buffer.from('not a zip'), 'application/zip');
+  assert.equal(bad.status, 422);
+  assert.match(bad.data.error.message, /导入文件解析失败/);
+
+  const traversal = await upload('evil.zip', makeZip([{ path: '../evil.sh', content: 'x' }]), 'application/zip');
+  assert.equal(traversal.status, 422);
+});

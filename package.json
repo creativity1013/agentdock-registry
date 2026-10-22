@@ -15,7 +15,8 @@
     "smoke:sqlite": "AGENTDOCK_STORE=sqlite node scripts/smoke.mjs",
     "test:sqlite": "node --test tests/sqlite.test.mjs",
     "examples:publish": "node scripts/publish-examples.mjs",
-    "examples:bundles": "node scripts/make-example-bundles.mjs"
+    "examples:bundles": "node scripts/make-example-bundles.mjs",
+    "examples:archives": "node scripts/make-example-archives.mjs"
   },
   "engines": {
     "node": ">=20.11"

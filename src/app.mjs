@@ -18,6 +18,9 @@ import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFrom
 import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, setPolicyFor, PolicyError } from './policy.mjs';
 import { createSessionManager } from './session.mjs';
 import { NOTIFY_EVENTS, NOTIFY_FORMATS, createNotifier, loadNotify } from './notify.mjs';
+import { analyzeInput } from './pipeline.mjs';
+import { buildImportPayload, MAX_IMPORT_BYTES } from './import.mjs';
+import { ArchiveError } from './archive.mjs';
 import { createOidcClient } from './oidc.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
@@ -429,6 +432,69 @@ export function createApp(config = loadConfig()) {
     }
 
     // 发布
+    // 多样化导入：JSON bundle / 文件夹 files 数组 / zip / tar.gz / 单文件 md / plugin.json
+    if (route === 'import' && method === 'POST') {
+      requireRole('publisher');
+      const query = url.searchParams;
+      const filename = query.get('filename') || String(req.headers['x-agentdock-filename'] || '');
+      const raw = await readRawBody(req, MAX_IMPORT_BYTES + 64 * 1024);
+      let built;
+      try {
+        built = await buildImportPayload({
+          filename,
+          contentType: String(req.headers['content-type'] || ''),
+          buffer: raw,
+          overrides: {
+            kind: query.get('kind') || undefined,
+            name: query.get('name') || undefined,
+            version: query.get('version') || undefined,
+            description: query.get('description') || undefined,
+            tags: query.get('tags')
+              ? query.get('tags').split(',').map((item) => item.trim()).filter(Boolean)
+              : undefined,
+          },
+        });
+      } catch (error) {
+        if (error instanceof ArchiveError) throw unprocessable(`导入文件解析失败：${error.message}`);
+        throw error;
+      }
+      if (query.get('dryRun') === '1') {
+        const report = analyzeInput(built.payload, { scanBlock: config.scanBlock });
+        return sendJson(res, 200, {
+          ok: true,
+          dryRun: true,
+          format: built.format,
+          kind: built.payload.kind,
+          name: built.payload.name,
+          version: built.payload.version,
+          valid: report.valid,
+          blocked: report.blocked,
+          errors: report.errors,
+          warnings: report.warnings,
+          summary: report.summary,
+          scan: report.scan,
+          verdict: report.verdict,
+        });
+      }
+      const result = store.publish(built.payload, { actor: auth.name, actorId: auth.id, role: auth.role, ip, tenant });
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'package.import',
+        target: `${built.payload.kind}/${built.payload.name}@${built.payload.version}`,
+        meta: { format: built.format, filename },
+        ip,
+      });
+      return sendJson(res, 201, {
+        ok: true,
+        format: built.format,
+        autoApproved: Boolean(result.autoApproved),
+        package: result.package,
+        version: publicVersion(result.version),
+        message: result.autoApproved ? '已通过策略自动审批并上架' : '已导入，等待审核',
+      });
+    }
+
     if (route === 'packages' && method === 'POST') {
       requireRole('publisher');
       const body = await readBody(req);
@@ -945,6 +1011,18 @@ function sendJson(res, status, data) {
     'Cache-Control': 'no-store',
   });
   res.end(body);
+}
+
+async function readRawBody(req, limit = MAX_BODY) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw tooLarge(`请求体超过 ${Math.round((limit / 1024 / 1024) * 10) / 10}MB`);
+    chunks.push(chunk);
+  }
+  if (size === 0) throw badRequest('请求体不能为空');
+  return Buffer.concat(chunks);
 }
 
 async function readBody(req, limit = MAX_BODY) {

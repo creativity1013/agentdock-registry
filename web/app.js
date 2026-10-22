@@ -348,15 +348,16 @@ async function renderMarket(main) {
     kindSelect,
     h('button', { class: 'btn', type: 'button', onClick: () => render() }, '刷新'),
     can('publisher')
-      ? h('button', { class: 'btn btn-primary', type: 'button', onClick: () => $('#publish-file').click() }, '导入 JSON 包')
+      ? h('button', { class: 'btn btn-primary', type: 'button', onClick: () => $('#publish-file').click() }, '导入能力包')
       : null,
-    can('publisher') ? h('button', { class: 'btn', type: 'button', onClick: importFromRegistry }, '从外部导入') : null,
+    can('publisher') ? h('button', { class: 'btn', type: 'button', onClick: () => $('#publish-folder').click() }, '导入文件夹') : null,
+    can('publisher') ? h('button', { class: 'btn', type: 'button', onClick: importFromRegistry }, '从远端仓库导入') : null,
     h('a', { class: 'btn btn-ghost', href: '/api/v1/registry/export', target: '_blank', rel: 'noreferrer' }, '导出目录'),
   );
 
   const grid = list.items.length
     ? h('div', { class: 'package-grid' }, ...list.items.map(packageCard))
-    : h('div', { class: 'empty' }, h('p', {}, '还没有已发布的能力包'), can('publisher') ? h('p', { class: 'hint' }, '点击「导入 JSON 包」或使用 CLI：agentdock publish <目录>') : null);
+    : h('div', { class: 'empty' }, h('p', {}, '还没有已发布的能力包'), can('publisher') ? h('p', { class: 'hint' }, '支持 JSON / ZIP / tar.gz / 单文件 MD / 文件夹；也可用 CLI：agentdock publish <文件或目录>') : null);
 
   const pager = list.totalPages > 1
     ? h(
@@ -1365,21 +1366,108 @@ async function renderTokens(main) {
 
 /* ------------------------------ 发布导入 ------------------------------ */
 
+const IMPORT_MIME = {
+  zip: 'application/zip',
+  'tar.gz': 'application/gzip',
+  tgz: 'application/gzip',
+  tar: 'application/x-tar',
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+};
+
+function bytesToBase64(bytes) {
+  let text = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    text += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(text);
+}
+
+async function readBundleFile(file, filePath) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  try {
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (!decoded.includes('\u0000')) return { path: filePath, content: decoded, encoding: 'utf8' };
+  } catch {
+    /* 二进制文件 */
+  }
+  return { path: filePath, content: bytesToBase64(bytes), encoding: 'base64' };
+}
+
+async function rawImport(file) {
+  const lower = file.name.toLowerCase();
+  const extension = lower.endsWith('.tar.gz') ? 'tar.gz' : lower.split('.').pop();
+  if (extension === 'json') {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    if (!payload || typeof payload !== 'object') throw new Error('JSON 必须是对象');
+    return api('/packages', { method: 'POST', body: payload });
+  }
+  const headers = {};
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const csrf = cookieValue(CSRF_COOKIE);
+  if (csrf) headers['x-agentdock-csrf'] = csrf;
+  headers['Content-Type'] = IMPORT_MIME[extension] || 'application/octet-stream';
+  const response = await fetch(`${API}/import?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers,
+    body: await file.arrayBuffer(),
+  });
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text.trim() ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    throw new Error(data?.error?.message || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
 async function onPublishFile(event) {
   const file = event.target.files?.[0];
   event.target.value = '';
   if (!file) return;
   try {
-    const text = await file.text();
-    const payload = JSON.parse(text);
-    if (!payload || typeof payload !== 'object') throw new Error('JSON 必须是对象');
-    const result = await api('/packages', { method: 'POST', body: payload });
-    toast(`已提交 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核`, 'ok');
+    const result = await rawImport(file);
+    const warnings = (result.warnings || []).length;
+    toast(
+      `已导入 ${result.package.kind}/${result.package.name}@${result.version.version}${warnings ? `（${warnings} 条告警）` : ''}，等待审核`,
+      'ok',
+    );
     state.view = 'market';
     render();
     refreshBadge();
   } catch (error) {
     toast(`导入失败：${error.message}`, 'error');
+  }
+}
+
+async function onPublishFolder(event) {
+  const files = [...(event.target.files || [])];
+  event.target.value = '';
+  if (files.length === 0) return;
+  const rootSegment = files[0].webkitRelativePath.split('/')[0] || 'imported-package';
+  try {
+    const entries = await Promise.all(
+      files.map((file) => {
+        const relative = file.webkitRelativePath.split('/').slice(1).join('/') || file.name;
+        return readBundleFile(file, relative);
+      }),
+    );
+    const result = await api(`/import?filename=${encodeURIComponent(rootSegment)}.json`, {
+      method: 'POST',
+      body: { files: entries },
+    });
+    toast(`已导入 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核`, 'ok');
+    state.view = 'market';
+    render();
+    refreshBadge();
+  } catch (error) {
+    toast(`文件夹导入失败：${error.message}`, 'error');
   }
 }
 
@@ -1429,6 +1517,7 @@ async function init() {
     }
   });
   document.querySelector('#publish-file').addEventListener('change', onPublishFile);
+  document.querySelector('#publish-folder').addEventListener('change', onPublishFolder);
 
   if (state.token) {
     try {
