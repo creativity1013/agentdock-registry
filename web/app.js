@@ -1014,17 +1014,25 @@ function actionControls(pkg, selected) {
       dirInput.style.display = targetSelect.value === 'dir' ? '' : 'none';
     });
     const force = h('input', { type: 'checkbox', id: 'install-force' });
-    const localCommand = `agentdock install ${pkg.kind}/${pkg.name}@${selected.version} --target <dsh|dsh-agent|claude|codex|shared|dir>`;
+    const localCmd = h('code', { class: 'cmd' }, '');
+    const syncLocalCommand = () => {
+      const target = targetSelect.value;
+      const dirPart = target === 'dir' ? ' --dir ./agentdock-installed' : '';
+      localCmd.textContent = `agentdock install ${pkg.kind}/${pkg.name}@${selected.version} --target ${target}${dirPart}`;
+    };
+    syncLocalCommand();
+    targetSelect.addEventListener('change', syncLocalCommand);
+    dirInput.addEventListener('input', syncLocalCommand);
     nodes.push(
-      h('span', { class: 'hint' }, '成员本机安装（把命令复制到成员自己的机器执行）：'),
+      h('span', { class: 'hint' }, '成员本机安装（复制到成员自己的机器执行；用下面的下拉框改变目标类型）：'),
       h('div', { class: 'cmd-row' },
-        h('code', { class: 'cmd' }, localCommand),
+        localCmd,
         h('button', {
           class: 'btn btn-ghost',
           type: 'button',
           onClick: async () => {
             try {
-              await navigator.clipboard.writeText(localCommand);
+              await navigator.clipboard.writeText(localCmd.textContent);
               toast('命令已复制', 'ok');
             } catch {
               toast('复制失败，请手动选择命令文本', 'error');
@@ -1053,7 +1061,7 @@ function actionControls(pkg, selected) {
       dirInput,
       h('label', { class: 'hint' }, force, ' 覆盖已有文件'),
       pkg.kind === 'agent'
-        ? h('span', { class: 'hint' }, 'dsh-agent 会生成 DSH preset 片段；要自动并入 profile，请用 CLI：agentdock install … --profile <名字>')
+        ? h('span', { class: 'hint' }, 'dsh-agent 会生成 DSH preset 片段；要自动并入 profile，在上面的命令后加 --profile 你的profile名（例如 --profile web）')
         : null,
       h(
         'button',
