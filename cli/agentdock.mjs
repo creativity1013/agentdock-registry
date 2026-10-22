@@ -64,7 +64,11 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock review approve <kind>/<name>@<version> [--note "..."]
   agentdock review reject  <kind>/<name>@<version> [--note "..."]
 
-  agentdock audit [--limit 50]                     审计日志（需 reviewer 角色）
+  agentdock audit [--limit 50] [--offset N] [--action <动作>] [--actor <用户>] [--target <子串>]
+                    [--from <ISO 时间>] [--to <ISO 时间>]     审计日志查询（需 reviewer 角色）
+  agentdock audit verify [--all]                   校验审计哈希链（--all 含归档；失败 exit 1）
+  agentdock audit export --format csv|jsonl [--out <文件>] [过滤 flags]
+                                                   导出审计记录（时间正序，CSV 按 RFC 4180 转义）
   agentdock tokens create <name> --role reviewer   创建令牌（需 admin 角色）
 
 全局选项：
@@ -868,17 +872,95 @@ async function cmdReview(positionals, flags) {
   console.log(`✓ 已${sub === 'approve' ? '通过' : '拒绝'} ${spec.kind}/${spec.name}@${spec.version}`);
 }
 
-async function cmdAudit(flags) {
+async function cmdAudit(positionals, flags) {
   const conn = resolveConnection(flags);
   requireToken(conn);
-  const limit = Number(flags.limit || 50);
-  const data = await api(conn, 'GET', `/api/v1/audit?limit=${limit}`);
+  const sub = positionals[0];
+
+  // agentdock audit verify [--all] —— 校验哈希链（失败 exit 1）
+  if (sub === 'verify') {
+    // 409 也携带完整校验结果，故不复用 api()（其对非 2xx 直接抛错）
+    const headers = { Authorization: `Bearer ${conn.token}` };
+    let response;
+    try {
+      response = await fetch(`${conn.url}/api/v1/audit/verify${flags.all ? '?all=1' : ''}`, { headers });
+    } catch (error) {
+      throw new Error(`无法连接 AgentDock（${conn.url}）：${error.cause?.code || error.message}`);
+    }
+    const data = await response.json();
+    if (flags.json) {
+      console.log(JSON.stringify(data, null, 2));
+      if (!data.ok) process.exitCode = 1;
+      return;
+    }
+    if (data.ok) {
+      const legacy = data.legacy ? `，另含 ${data.legacy} 条旧格式记录` : '';
+      console.log(`✓ 审计日志校验通过（${data.entries} 条链式记录${legacy}，头部 ${data.headHash.slice(0, 16)}…）`);
+    } else {
+      console.error(`✗ 审计日志校验失败（断链位置：${data.brokenAt || '未知'}）`);
+      for (const reason of data.reasons || []) console.error(`  - ${reason}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  // agentdock audit export --format csv|jsonl [--out <文件>] [过滤 flags]
+  if (sub === 'export') {
+    const format = String(flags.format || 'jsonl');
+    if (format !== 'csv' && format !== 'jsonl') throw new Error(`--format 只能是 csv / jsonl：${format}`);
+    const query = new URLSearchParams({ format, ...Object.fromEntries(auditQuery(flags)) });
+    const headers = { Authorization: `Bearer ${conn.token}` };
+    let response;
+    try {
+      response = await fetch(`${conn.url}/api/v1/audit/export?${query.toString()}`, { headers });
+    } catch (error) {
+      throw new Error(`无法连接 AgentDock（${conn.url}）：${error.cause?.code || error.message}`);
+    }
+    const text = await response.text();
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        message = JSON.parse(text)?.error?.message || message;
+      } catch {
+        /* 保留默认消息 */
+      }
+      throw new Error(message);
+    }
+    if (flags.out) {
+      fs.writeFileSync(flags.out, text, 'utf8');
+      console.log(`✓ 已导出 ${text.split('\n').filter(Boolean).length} 条记录到 ${flags.out}`);
+      return;
+    }
+    process.stdout.write(text);
+    return;
+  }
+
+  if (sub) throw new Error('audit 子命令：（无，直接查询）/ verify / export');
+
+  // agentdock audit [--limit N] [--offset N] [--action ...] [--actor ...] [--target ...] [--from ISO] [--to ISO]
+  const data = await api(conn, 'GET', `/api/v1/audit?${auditQuery(flags).toString()}`);
   if (flags.json) return console.log(JSON.stringify(data, null, 2));
   printTable(
-    data.items.map((item) => [item.ts?.slice(0, 19).replace('T', ' '), item.actor, item.action, item.target]),
-    ['时间', '操作者', '动作', '对象'],
+    data.items.map((item) => [
+      item.ts?.slice(0, 19).replace('T', ' '),
+      item.actor,
+      item.action,
+      item.target,
+      item.seq ? `#${item.seq}` : '-',
+    ]),
+    ['时间', '操作者', '动作', '对象', '序号'],
   );
-  console.log(`\n共 ${data.total} 条审计记录`);
+  console.log(`\n共 ${data.total} 条审计记录（哈希链防篡改，agentdock audit verify 校验）`);
+}
+
+/** 审计查询/导出共用的过滤参数 */
+function auditQuery(flags) {
+  const query = new URLSearchParams();
+  for (const key of ['action', 'actor', 'target', 'from', 'to', 'limit', 'offset']) {
+    const value = flags[key];
+    if (value !== undefined && value !== true && value !== '') query.set(key, String(value));
+  }
+  return query;
 }
 
 async function cmdTokens(positionals, flags) {
@@ -1028,7 +1110,7 @@ async function main() {
     case 'review':
       return cmdReview(positionals, flags);
     case 'audit':
-      return cmdAudit(flags);
+      return cmdAudit(positionals, flags);
     case 'keys':
       return cmdKeys(flags);
     case 'verify-signature':

@@ -80,8 +80,10 @@ agentdock install agent/code-reviewer --target claude --force
 agentdock install plugin/ops-kit --target dir --dir ./out
 agentdock install agent/code-reviewer --target dsh-agent --profile web --force  # 生成 DSH preset 片段并并入 profile
 
-# 审计与令牌
-agentdock audit --limit 20
+# 审计与令牌（审计日志带防篡改哈希链）
+agentdock audit --limit 20                          # 查询：--actor/--action/--target/--from/--to
+agentdock audit verify --all                        # 校验哈希链（--all 含归档；断链 exit 1）
+agentdock audit export --format csv --out audit.csv # 导出（csv / jsonl）
 agentdock tokens create --name ci-bot --role publisher
 
 # 把 ~/.claude/agents/*.md 批量导入为 agent 包（默认干跑，--publish 才提交）
@@ -120,7 +122,7 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `review queue` | 列出待审核版本 |
 | `review approve\|reject <kind/name@version>` | 审核操作（`--note`） |
 | `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段 |
-| `audit` | 查看审计日志（`--limit --action --json`） |
+| `audit` | 审计日志查询/校验/导出：`audit [--limit --offset --action --actor --target --from --to --json]`；`audit verify [--all]` 校验哈希链（断链 exit 1）；`audit export --format csv\|jsonl [--out 文件]`（需 reviewer） |
 | `verify-signature <kind/name[@version]>` | 验证内容签名（ed25519）；同时重算磁盘内容哈希发现篡改（`--json`） |
 | `keys [--mine]` | 导出平台签名公钥（可离线验签）；`--mine` 查看自己的发布者公钥 |
 | `keygen` | 生成发布者 ed25519 密钥对（`--out --name --force`；私钥 600、公钥可公开） |
@@ -296,7 +298,9 @@ my-plugin/
 | GET | `/registry` | 公开 | 外部 registry 适配器信息与导出地址 |
 | GET | `/registry/export` | 公开 | 中立市场目录（`agentdock-marketplace@1`：bundleUrl、contentHash、签名摘要、digest） |
 | POST | `/sync/import` | publisher | 从外部 registry 导入 `{source:{type:"github",repo,path,ref}}` 或 `{source:{type:"mcp",name}}`；`dryRun:true` 只预检 |
-| GET | `/audit` | reviewer | 审计日志（`limit/offset/action`） |
+| GET | `/audit` | reviewer | 审计日志（`limit/offset/action/actor/target/from/to`，最新在前） |
+| GET | `/audit/verify` | reviewer | 校验审计哈希链（`?all=1` 含归档；断链返回 409 与断链位置） |
+| GET | `/audit/export` | reviewer | 导出审计（`format=csv\|jsonl`，过滤参数同 `/audit`，时间正序） |
 | GET | `/admin/users` | admin | 用户列表 |
 | POST | `/admin/tokens` | admin | 创建令牌 `{name,role}` |
 
@@ -495,7 +499,7 @@ agentdock/
 │   ├── backend.mjs          # 元数据后端选择（json / sqlite 统一接口）
 │   ├── sqlite.mjs           # node:sqlite 后端（关系表 + WAL + db.json 自动迁移）
 │   ├── auth.mjs             # 令牌/角色
-│   ├── audit.mjs            # JSONL 审计
+│   ├── audit.mjs            # JSONL 审计（哈希链 + 多维过滤 + 校验 + 导出 + 轮转）
 │   ├── config.mjs           # 配置与数据目录
 │   ├── errors.mjs / util.mjs / yaml.mjs
 ├── web/                     # 零依赖市场 UI（原生 JS）
@@ -529,7 +533,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 ## 安全模型与已知限制
 
 - 令牌只存 `sha256` 哈希；初始明文令牌仅出现在 `data/BOOTSTRAP-TOKENS.txt`（600 权限），建议首次登录后轮换并删除该文件。
-- 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip。
+- 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip。每条记录带 `seq`/`prevHash`/`hash` 哈希链（`hash = sha256([seq, prevHash, ts, actor, role, action, target, meta, ip])`），篡改/删除/插入可被 `agentdock audit verify`（或 `GET /audit/verify`）定位；超过 `AGENTDOCK_AUDIT_MAX_BYTES`（默认 8MB）轮转到 `data/audit/archive/`，保留 `AGENTDOCK_AUDIT_KEEP`（默认 24）份归档，链跨文件连续。
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
 - 扫描是**启发式规则**，不是沙箱：绕过规则注入的能力包仍可能危险，审核环节不可省。
 - **内容签名**：版本审核通过时，平台用 ed25519 私钥对规范化载荷 `agentdock-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名；私钥存于 `data/signing-key.json`（600 权限，务必备份），公钥通过 `GET /api/v1/keys` 公开，任何人可离线验签。`verify-signature` / `?verify=1` 会同时重算磁盘内容哈希，能发现发布后对存储内容的替换或篡改。

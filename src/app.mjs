@@ -523,13 +523,31 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { ok: true, policy: next, message: '策略已更新' });
     }
 
-    // 审计日志
+    // 审计日志（哈希链 + 多维过滤）
     if (route === 'audit' && method === 'GET') {
       requireRole('reviewer');
       const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') || 100)));
       const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
-      const action = url.searchParams.get('action') || '';
-      return sendJson(res, 200, audit.read({ limit, offset, action }));
+      return sendJson(res, 200, audit.read({ limit, offset, ...auditFilters(url) }));
+    }
+    if (route === 'audit/verify' && method === 'GET') {
+      requireRole('reviewer');
+      const result = audit.verify({ all: url.searchParams.get('all') === '1' });
+      return sendJson(res, result.ok ? 200 : 409, { ok: result.ok, ...result });
+    }
+    if (route === 'audit/export' && method === 'GET') {
+      requireRole('reviewer');
+      const format = url.searchParams.get('format') || 'jsonl';
+      if (format !== 'csv' && format !== 'jsonl') throw badRequest(`format 只能是 csv / jsonl：${format}`);
+      const { contentType, body } = audit.exportLines({ format, ...auditFilters(url) });
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': Buffer.byteLength(body),
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': `attachment; filename="audit-export.${format}"`,
+      });
+      return res.end(body);
     }
 
     // 用户与令牌管理
@@ -622,6 +640,17 @@ export function createApp(config = loadConfig()) {
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */
+
+/** 从查询串提取审计过滤参数（action/actor 精确，target 子串，from/to ISO 范围） */
+function auditFilters(url) {
+  return {
+    action: url.searchParams.get('action') || '',
+    actor: url.searchParams.get('actor') || '',
+    target: url.searchParams.get('target') || '',
+    from: url.searchParams.get('from') || '',
+    to: url.searchParams.get('to') || '',
+  };
+}
 
 function publicVersion(versionDoc) {
   return {

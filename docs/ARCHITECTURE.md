@@ -96,7 +96,8 @@ data/
 ├── users.json                   # 用户与令牌哈希
 ├── signing-key.json             # 平台 ed25519 签名私钥（600，务必备份）
 ├── BOOTSTRAP-TOKENS.txt         # 首次启动的明文令牌（600，可删）
-├── audit.log                    # append-only JSONL 审计
+├── audit.log                    # append-only JSONL 审计（带哈希链，超限轮转）
+├── audit/archive/               # 审计归档 audit-<yyyyMMdd-HHmmss>-<ms>.log（保留 AGENTDOCK_AUDIT_KEEP 份）
 ├── transparency.log             # 可验证透明日志（哈希链，append-only，审核通过时追加）
 ├── policy.json                  # 自动审批策略（可缺省；缺省等同关闭）
 ├── agentdock.sqlite             # 可选 SQLite 元数据后端（AGENTDOCK_STORE=sqlite，含 -wal/-shm）
@@ -169,13 +170,23 @@ data/
 | `reviewer` | 以上 + 审核、查看待审核版本与审计 |
 | `admin` | 以上 + 创建令牌、覆盖扫描阻断 |
 
-### audit.log（JSONL）
+### audit.log（JSONL，哈希链防篡改）
 
 ```jsonc
-{"at":"2026-10-21T10:00:00.000Z","actor":"publisher","role":"publisher","action":"package.publish","target":"skill/demo-skill@0.1.0","meta":{"contentHash":"sha256:…"},"ip":"127.0.0.1"}
+{"ts":"2026-10-21T10:00:00.000Z","actor":"publisher","role":"publisher","action":"package.publish","target":"skill/demo-skill@0.1.0","meta":{"contentHash":"sha256:…"},"ip":"127.0.0.1","seq":1,"prevHash":"000…000","hash":"a77a…"}
 ```
 
 动作命名：`package.publish`、`package.install`（meta.target 区分安装目标）、`review.approve`、`review.reject`、`user.create_token`。
+
+每条记录的三个链字段：
+
+- `seq`：全局递增序号（跨轮转连续；升级前的旧格式记录无链字段，跳过校验、只计数）
+- `prevHash`：上一条记录的 hash（首条为全零 genesis；轮转后新文件首条接续旧文件链头，链跨文件连续）
+- `hash = sha256(JSON.stringify([seq, prevHash, ts, actor, role, action, target, meta, ip]))`（固定字段顺序数组，避免序列化歧义）
+
+校验：`GET /api/v1/audit/verify`（或 CLI `audit verify`）读磁盘重算全链，报告篡改/删除/插入/损坏行的位置（断链返回 409）；`?all=1` 遍历 `data/audit/archive/` 归档并校验文件间衔接，手动删除中间归档会报 gap（删最老归档不可检测——链起点之前没有锚）。轮转由写入侧自动执行：超过 `AGENTDOCK_AUDIT_MAX_BYTES`（默认 8MB，0=关闭）把 `audit.log` 改名归档，保留 `AGENTDOCK_AUDIT_KEEP`（默认 24，0=不限）份；归档文件名含毫秒且进程内保证单调递增，字典序即创建顺序。导出：`GET /audit/export?format=jsonl|csv`（csv 按 RFC 4180 转义，列 `ts,actor,role,action,target,ip,seq,hash,meta`）。
+
+查询：`GET /audit` 支持 `action`/`actor` 精确匹配、`target` 子串（忽略大小写）、`from`/`to` ISO 时间范围，`limit/offset` 分页，最新在前。
 
 ### 发布者签名（users.json keys[] + version.publisherSignature）
 
@@ -244,7 +255,7 @@ data/
 | `src/backend.mjs` | 元数据后端选择与统一接口（json / sqlite） | `createBackend`、`describeBackends`、`BACKEND_KINDS` |
 | `src/sqlite.mjs` | `node:sqlite` 后端：关系表 + WAL + db.json 自动迁移 | `createSqliteBackend`、`sqliteAvailable`、`SQLITE_SCHEMA_VERSION` |
 | `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf`）、`tokenFromRequest` |
-| `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
+| `src/audit.mjs` | 审计日志（哈希链 + 过滤 + 校验 + 导出 + 轮转） | `createAuditLog`（`append/read/verify/exportLines`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
 | `cli/agentdock.mjs` | 命令行、本地校验、导入器 | — |
@@ -256,12 +267,12 @@ data/
 1. **路径消毒**（`sanitizePath`）：拒绝绝对路径、盘符、`..`、控制字符、隐藏文件、Windows 保留名、`node_modules`；空目录段与尾随空格也拒绝。安装与读取文件前再拼一次根目录并校验 `path.resolve(root, rel)` 前缀。
 2. **体积限制**：文件数 200、单文件 512KB、总量 2MB，防止内存/磁盘 DoS。
 3. **令牌**：32 字节随机数（base64url），仅存 `sha256`；比较用 `safeEqual`（`crypto.timingSafeEqual`）。首启明文令牌写 600 文件并提示删除。
-4. **审计**：所有写操作（发布、审核、安装、令牌创建）均记录，append-only JSONL。
+4. **审计**：所有写操作（发布、审核、安装、令牌创建）均记录，append-only JSONL 且带 `seq/prevHash/hash` 哈希链，`/audit/verify` 读磁盘重算可发现篡改；查询支持 action/actor/target/时间范围过滤，可导出 jsonl/csv，超限自动轮转归档（链跨文件连续）。
 5. **扫描**：启发式规则，可配置阻断阈值；`overrideScan` 仅 admin、且事件写入审计。
 6. **网络**：默认仅监听 `127.0.0.1`；无内置 TLS，生产部署应置于反向代理后。
 7. **内容签名与完整性**：审核通过即用平台 ed25519 私钥签名（绑定 kind/name/version/contentHash）；公钥公开、可离线验签；验签时重算磁盘内容哈希，可发现发布后对 `packages/` 内容的替换。
 8. **发布者签名（可选）**：发布者用自有 ed25519 私钥对 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥时 TOFU 注册到 `users.json` 的 `keys[]`（等价 `POST /me/keys`）。平台签名证明「审过且未被替换」，发布者签名证明「谁提交的」。
-9. **可验证透明日志**：审核通过时向 `transparency.log` 追加哈希链事件（contentHash、发布者、平台/发布者 keyId、审核人），事件哈希构造 RFC 6962 风格 Merkle 树；`/transparency/verify` 校验整链，`/transparency/proof` 返回包含证明，CLI 使用 `verifyInclusionProof` 本地校验。`audit.log` 面向运维（含 IP/角色），`transparency.log` 面向外部可复核（不含敏感字段）。
+9. **可验证透明日志**：审核通过时向 `transparency.log` 追加哈希链事件（contentHash、发布者、平台/发布者 keyId、审核人），事件哈希构造 RFC 6962 风格 Merkle 树；`/transparency/verify` 校验整链，`/transparency/proof` 返回包含证明，CLI 使用 `verifyInclusionProof` 本地校验。`audit.log` 面向运维（含 IP/角色；自己的哈希链只用于内部防篡改校验，无 Merkle/公开证明），`transparency.log` 面向外部可复核（不含敏感字段）。
 10. **外部 registry 导入**（`registry.mjs`）：只从服务端配置的 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY` 读取，请求体不接受任意 URL（防 SSRF）；单次 200 文件 / 单文件 512KB / 总量 2MB、15s 超时；外部内容一律走同一 normalize → validate → scan 流水线，导入后为 `pending`，必须审核才能上架；导入操作需 publisher 权限并记录审计 `sync.import`。
 11. **SBOM 与自动审批**：每个版本生成 `agentdock-sbom@1`（文件哈希 + 声明的工具/MCP/技能组件 + 可复现 digest），供审核与供应链比对；自动审批默认关闭，开启后仅对策略白名单内、无高危、体积达标且（可选）带发布者签名的版本生效，自动通过的版本同样有平台签名、透明日志与审计，未通过记录失败规则，保证「放宽人工审核」不牺牲可追溯性。
 

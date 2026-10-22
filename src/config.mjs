@@ -43,6 +43,16 @@ export function loadConfig(env = process.env, overrides = {}) {
     throw new Error(`AGENTDOCK_STORE 只能是 json / sqlite：${backend}`);
   }
 
+  // 审计日志轮转：超过 maxBytes 轮转归档，保留 keep 份归档（0 = 不轮转 / 归档不限量）
+  const auditMaxBytes = Number(overrides.audit?.maxBytes ?? env.AGENTDOCK_AUDIT_MAX_BYTES ?? 8 * 1024 * 1024);
+  if (!Number.isFinite(auditMaxBytes) || auditMaxBytes < 0) {
+    throw new Error(`AGENTDOCK_AUDIT_MAX_BYTES 不合法：${env.AGENTDOCK_AUDIT_MAX_BYTES}`);
+  }
+  const auditKeep = Number(overrides.audit?.keep ?? env.AGENTDOCK_AUDIT_KEEP ?? 24);
+  if (!Number.isInteger(auditKeep) || auditKeep < 0) {
+    throw new Error(`AGENTDOCK_AUDIT_KEEP 不合法：${env.AGENTDOCK_AUDIT_KEEP}`);
+  }
+
   const config = {
     host,
     port,
@@ -59,12 +69,17 @@ export function loadConfig(env = process.env, overrides = {}) {
       backend,
       sqliteFile: path.join(dataDir, 'agentdock.sqlite'),
     },
+    audit: {
+      maxBytes: auditMaxBytes,
+      keep: auditKeep,
+    },
     files: {
       db: path.join(dataDir, 'db.json'),
       sqlite: path.join(dataDir, 'agentdock.sqlite'),
       users: path.join(dataDir, 'users.json'),
       bootstrapTokens: path.join(dataDir, 'BOOTSTRAP-TOKENS.txt'),
       audit: path.join(dataDir, 'audit.log'),
+      auditArchive: path.join(dataDir, 'audit', 'archive'),
       packages: path.join(dataDir, 'packages'),
       signingKey: path.join(dataDir, 'signing-key.json'),
       transparency: path.join(dataDir, 'transparency.log'),
