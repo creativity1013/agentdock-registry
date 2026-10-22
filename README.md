@@ -580,6 +580,27 @@ docker exec agentdock cat /data/BOOTSTRAP-TOKENS.txt   # 首次启动生成的 a
 
 生产注意：默认没有 TLS 与 SSO，请放在反向代理（HTTPS + 认证）之后，并限制 `/api/v1/admin/*` 入口；`/data` 需持久化并备份（`db.json`、`packages/`、`audit.log`、`users.json`）。
 
+### 生产部署：Caddy 自动 HTTPS（`docker-compose.prod.yml`）
+
+仓库自带一套生产部署示例：Caddy 容器负责自动申请/续期证书与终止 TLS，AgentDock 只监听容器内部网络的 `7788`，宿主机不暴露该端口。
+
+```bash
+cp deploy/.env.example .env          # 填 AGENTDOCK_DOMAIN（已解析到本机的域名）与 ACME_EMAIL
+docker compose -f docker-compose.prod.yml up -d --build
+docker exec agentdock cat /data/BOOTSTRAP-TOKENS.txt
+# 浏览器访问 https://<AGENTDOCK_DOMAIN>
+```
+
+要点：
+
+- **网络边界**：只发布 `80/443`（HTTP 用于 ACME 校验并跳转 HTTPS）；`7788` 不对宿主暴露，避免绕过 TLS。
+- **代理信任**：容器内设置 `AGENTDOCK_TRUST_PROXY=1`，限流与审计才能取到真实来源 IP（`X-Forwarded-For`）；只应在可信反代之后开启。
+- **对外地址**：`AGENTDOCK_PUBLIC_URL=https://${AGENTDOCK_DOMAIN}` 用于 OIDC 回调地址、市场目录导出等；启用 SSO 时 IdP 侧回调填 `https://<域名>/auth/oidc/callback`。
+- **安全头**：Caddy 层统一加 HSTS / `X-Content-Type-Options` / `X-Frame-Options` / Referrer-Policy，应用自身也会下发。
+- **证书状态**：`docker compose -f docker-compose.prod.yml logs caddy` 查看 ACME 过程；证书存于 `caddy-data` 卷，请与 `agentdock-data` 一起备份。
+- 没有公网域名时可用 Cloudflare Tunnel / Tailscale / frp 暴露本地服务（TLS 由隧道提供），此时把 `AGENTDOCK_PUBLIC_URL` 设为隧道地址即可。
+- 本机 Docker daemon 未启动时无法验证镜像构建；`docker compose -f docker-compose.prod.yml config` 可离线校验配置，镜像构建由 CI 的 docker job 验证。
+
 ### GitHub Actions CI
 
 `.github/workflows/ci.yml` 在 push / pull request 时跑两个 job：

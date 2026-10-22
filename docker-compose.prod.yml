@@ -1,0 +1,55 @@
+# 生产部署：Caddy 终止 TLS（自动申请/续期证书），应用只走内部网络。
+#
+# 使用：
+#   cp deploy/.env.example .env    # 填 AGENTDOCK_DOMAIN / ACME_EMAIL
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# 说明：
+# - 只暴露 80/443；7788 不映射到宿主机（宿主机上仍可通过 docker exec 访问）
+# - AGENTDOCK_TRUST_PROXY=1 让限流/审计取 X-Forwarded-For（仅在可信反代后开启）
+# - AGENTDOCK_PUBLIC_URL 用于 OIDC 回调、市场目录导出等对外地址
+services:
+  agentdock:
+    build: .
+    image: agentdock:latest
+    container_name: agentdock
+    environment:
+      AGENTDOCK_HOST: 0.0.0.0
+      AGENTDOCK_PORT: "7788"
+      AGENTDOCK_DATA: /data
+      AGENTDOCK_SCAN_BLOCK: high
+      AGENTDOCK_PUBLIC_URL: https://${AGENTDOCK_DOMAIN:?请在 .env 里设置 AGENTDOCK_DOMAIN}
+      AGENTDOCK_TRUST_PROXY: "1"
+    volumes:
+      - agentdock-data:/data
+    expose:
+      - "7788"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7788/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: agentdock-caddy
+    depends_on:
+      - agentdock
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      AGENTDOCK_DOMAIN: ${AGENTDOCK_DOMAIN:?请在 .env 里设置 AGENTDOCK_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?请在 .env 里设置 ACME_EMAIL}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  agentdock-data:
+  caddy-data:
+  caddy-config:

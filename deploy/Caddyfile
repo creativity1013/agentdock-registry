@@ -1,0 +1,30 @@
+# AgentDock 生产反代（Caddy 自动 HTTPS）
+# 由 docker-compose.prod.yml 挂载到 /etc/caddy/Caddyfile；
+# 域名与 ACME 邮箱由同目录 .env 提供（AGENTDOCK_DOMAIN / ACME_EMAIL）。
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$AGENTDOCK_DOMAIN} {
+	encode zstd gzip
+
+	# 安全响应头（应用自身也会设置，反代层再兜底一层）
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# 健康检查在反代层直接返回，不进入应用
+	@health path /api/v1/health
+	respond @health "ok" 200
+
+	reverse_proxy agentdock:7788 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}
