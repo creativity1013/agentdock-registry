@@ -115,25 +115,36 @@ function ruleGroup(ruleId) {
 const SEV_ORDER = { high: 0, medium: 1, low: 2 };
 
 /** 扫描发现列表（按严重度排序，含规则组与命中片段）；详情页与审核队列共用 */
+function scanLegend() {
+  return h('div', { class: 'scan-legend' },
+    h('div', { class: 'legend-item' }, h('span', { class: 'sev high' }, '高危'), '可能导致凭据泄漏、命令执行或劫持 agent 行为；默认阻止发布，必须人工确认'),
+    h('div', { class: 'legend-item' }, h('span', { class: 'sev medium' }, '中危'), '可疑信号，需结合能力用途与上下文判断；不默认阻断'),
+    h('div', { class: 'legend-item' }, h('span', { class: 'sev low' }, '低危'), '编码不规范或轻微风险提示；通常不阻断'));
+}
+
 function findingsList(scan) {
   const findings = [...(scan?.findings || [])].sort((a, b) => (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9));
-  if (findings.length === 0) return [h('span', { class: 'muted' }, '未发现问题')];
-  return findings.map((finding) =>
-    h(
-      'div',
-      { class: 'finding' },
+  if (findings.length === 0) return [h('span', { class: 'muted' }, '未发现问题（静态规则级扫描，不代表绝对安全）')];
+  return [
+    scanLegend(),
+    ...findings.map((finding) =>
       h(
         'div',
-        { class: 'finding-head' },
-        h('span', { class: `sev ${finding.severity}` }, finding.severity),
-        h('span', { class: 'mono' }, finding.ruleId),
-        h('span', { class: 'tag' }, ruleGroup(finding.ruleId)),
-        h('span', {}, finding.title),
-        h('span', { class: 'muted' }, `${finding.file}${finding.line ? `#L${finding.line}` : ''}`),
+        { class: 'finding' },
+        h(
+          'div',
+          { class: 'finding-head' },
+          h('span', { class: `sev ${finding.severity}` }, finding.severity),
+          h('span', { class: 'mono' }, finding.ruleId),
+          h('span', { class: 'tag' }, ruleGroup(finding.ruleId)),
+          h('span', {}, finding.title),
+          h('span', { class: 'muted' }, `${finding.file}${finding.line ? `#L${finding.line}` : ''}`),
+        ),
+        finding.snippet ? h('div', { class: 'snippet mono' }, finding.snippet) : null,
+        finding.reason ? h('div', { class: 'finding-reason' }, `为什么判定：${finding.reason}`) : null,
       ),
-      finding.snippet ? h('div', { class: 'snippet mono' }, finding.snippet) : null,
     ),
-  );
+  ];
 }
 
 /** 增量扫描说明（SUP-002：与哪个基准版本比对） */

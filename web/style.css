@@ -1227,3 +1227,27 @@ pre.code {
 .group-title.clickable:hover .chip {
   filter: brightness(1.25);
 }
+
+/* 扫描等级说明 */
+.scan-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.scan-legend .legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.finding-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}

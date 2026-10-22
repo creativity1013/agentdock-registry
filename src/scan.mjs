@@ -16,6 +16,31 @@
  */
 export const SEVERITY_ORDER = { low: 0, medium: 1, high: 2 };
 export const SEVERITY_LABEL = { high: '高危', medium: '中危', low: '低危' };
+export const SEVERITY_EXPLAIN = {
+  high: '可能导致凭据泄漏、命令执行或劫持 agent 行为，默认阻止发布',
+  medium: '可疑信号，需要结合用途与上下文人工判断，不默认阻断',
+  low: '编码不规范或轻微风险提示，通常不阻断',
+};
+
+const GROUP_REASON = {
+  PI: '判定依据：命中了「提示注入 / 指令操纵」特征，这类内容可能让 agent 偏离原有任务或被操控',
+  EX: '判定依据：提及把数据发送到外部地址，存在数据渗出风险',
+  SEC: '判定依据：命中密钥/凭据格式，可能导致凭据泄漏',
+  SH: '判定依据：包含危险、破坏性或提权命令',
+  EXEC: '判定依据：包含动态执行/子进程调用，是代码类 plugin 的主要风险面',
+  PER: '判定依据：涉及持久化或修改 harness/系统配置，可能被用于横向移动',
+  HID: '判定依据：使用隐藏、混淆或不可见字符，常用于绕过审查或投毒',
+  MET: '判定依据：结构性风险（依赖文件路径、描述投毒、生命周期脚本、危险工具组合）',
+  BIN: '判定依据：包含二进制文件，无法做静态内容审查',
+  SUP: '判定依据：供应链风险（名称抢注、更新突变、依赖路径异常）',
+};
+
+/** 给一条扫描发现生成「为什么被判定为这个等级」的说明 */
+export function explainFinding(ruleId, severity) {
+  const group = GROUP_REASON[String(ruleId).split('-')[0]] || '判定依据：命中静态安全扫描规则';
+  const level = `强度判定（${SEVERITY_LABEL[severity] || severity}）：${SEVERITY_EXPLAIN[severity] || '按规则默认等级处理'}`;
+  return `${group}；${level}`;
+}
 
 const RULES = [
   /* ---------------------------- 提示注入 / 指令操纵 ---------------------------- */
@@ -328,6 +353,7 @@ function pushFinding(findings, rule, file, line, snippet, seen) {
     file,
     line,
     snippet: String(snippet || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+    reason: explainFinding(rule.id, rule.severity),
   });
 }
 
