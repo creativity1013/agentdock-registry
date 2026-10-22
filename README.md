@@ -411,6 +411,10 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | `AGENTDOCK_OIDC_DEFAULT_ROLE` | `viewer` | 新账号默认角色：`viewer/publisher/reviewer/admin` |
 | `AGENTDOCK_OIDC_TENANT_CLAIM` | `tenant` | 用户信息中表示租户的 claim 名 |
 | `AGENTDOCK_OIDC_ROLE_CLAIM` | `role` | 用户信息中表示角色的 claim 名（须为合法角色） |
+| `AGENTDOCK_OIDC_GROUPS_CLAIM` | `groups` | 用户信息中表示组的 claim 名（数组或以空格/逗号分隔的字符串） |
+| `AGENTDOCK_OIDC_GROUP_ROLES` | — | 组→角色映射，如 `agents-admins=admin,agents-reviewers=reviewer`（role claim 缺失时生效，取最高权限组） |
+| `AGENTDOCK_OIDC_MFA_REQUIRED` | — | 设为 `1` 时要求 IdP 在 `amr` 中声明多因素（`mfa/totp/hwk/swk/otp`），否则拒绝登录 |
+| `AGENTDOCK_OIDC_AMR_CLAIM` | `amr` | 表示认证方式（多因素）的 claim 名 |
 | `AGENTDOCK_RATE_LIMIT` | 启用 | 设为 `0` 关闭单机限流 |
 | `AGENTDOCK_RATE_LIMIT_WINDOW_MS` | `60000` | 限流窗口（毫秒） |
 | `AGENTDOCK_RATE_LIMIT_MAX` | `300` | 每窗口每 IP 的 API 请求上限 |
@@ -543,7 +547,14 @@ AgentDock 支持用外部 OIDC（Keycloak / Okta / Entra ID / Auth0 / Google 等
 
 **启用方式**：配置 `AGENTDOCK_OIDC_ISSUER` 与 `AGENTDOCK_OIDC_CLIENT_ID` 后重启，桌面端右上角出现「SSO 登录」按钮；登录成功后写入 `agentdock_session`（HttpOnly、SameSite=Lax、HMAC 签名，8 小时有效）。
 
-**流程**：OIDC Authorization Code + PKCE（零依赖实现，不做本地 JWT 验签，身份以 userinfo 端点为准）→ 用 `sub/email/name` 自动建号或复用已有账号 → 角色取 `role` claim（缺省为 `viewer`）→ 租户取 `tenant` claim（缺省 `default`）。
+**流程**：OIDC Authorization Code + PKCE（零依赖实现，不做本地 JWT 验签，身份以 userinfo 端点为准）→ 用 `sub/email/name` 自动建号或复用已有账号 → 角色取 `role` claim；缺失时按 `groups` × `AGENTDOCK_OIDC_GROUP_ROLES` 映射（多组命中取最高权限），再缺省为 `viewer` → 租户取 `tenant` claim（缺省 `default`）。SSO 用户每次登录都会按 IdP 声明同步角色与租户（IdP 是权威来源；管理员应通过 IdP 组调整权限）。
+
+**组映射示例**（Keycloak/Entra 组名任意）：
+```bash
+AGENTDOCK_OIDC_GROUP_ROLES="agents-admins=admin,agents-reviewers=reviewer,agents-publishers=publisher"
+```
+
+**MFA**：AgentDock 不自建第二因素，而是要求 IdP 完成 MFA 并在 userinfo 的 `amr` 中回传（如 `["pwd","totp"]`）。设置 `AGENTDOCK_OIDC_MFA_REQUIRED=1` 后，未声明多因素的登录会被拒绝（`403 OIDC_MFA_REQUIRED`）；同时建议在 IdP 侧强制 MFA 策略。
 
 **多租户语义**（版本 `tenant` 字段在发布时从令牌继承）：
 
@@ -685,7 +696,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（131 个用例）
+├── tests/                   # node:test 测试（133 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 

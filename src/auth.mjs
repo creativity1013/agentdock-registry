@@ -151,6 +151,9 @@ export function createUserDirectory(config) {
     if (existing) {
       existing.oidcSub = existing.oidcSub || subject;
       if (email) existing.email = email;
+      // IdP 是 SSO 用户的角色/租户权威来源：登录时同步（管理员可直接在 IdP 调整组）
+      if (['viewer', 'publisher', 'reviewer', 'admin'].includes(role)) existing.role = role;
+      if (tenant) existing.tenant = tenant;
       existing.lastLoginAt = nowIso();
       writeJsonAtomic(usersFile, state);
       return {

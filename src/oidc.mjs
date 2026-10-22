@@ -97,15 +97,38 @@ export function createOidcClient(config, { fetchImpl = globalThis.fetch, now = D
   }
 
   /** 把 userinfo 声明映射成 AgentDock 身份 */
+  const ROLE_RANK = { viewer: 0, publisher: 1, reviewer: 2, admin: 3 };
+
+  function claimList(value) {
+    if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+    if (typeof value === 'string') return value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+    return [];
+  }
+
   function mapClaims(claims) {
     const tenant = String(claims[settings.tenantClaim] || claims.tenant || 'default').trim() || 'default';
     const rawRole = String(claims[settings.roleClaim] || claims.role || '').trim();
-    const role = ['viewer', 'publisher', 'reviewer', 'admin'].includes(rawRole) ? rawRole : settings.defaultRole;
+    const groups = claimList(claims[settings.groupsClaim] ?? claims.groups);
+    let role = ['viewer', 'publisher', 'reviewer', 'admin'].includes(rawRole) ? rawRole : '';
+    // 组映射：未提供显式 role（或 role 非法）时，按 groups → 角色映射取最高权限
+    if (!role) {
+      role = settings.defaultRole;
+      for (const group of groups) {
+        const mapped = settings.groupRoleMap?.[group];
+        if (mapped && ROLE_RANK[mapped] > ROLE_RANK[role]) role = mapped;
+      }
+    }
     const email = String(claims.email || '').trim();
     const name = String(claims.name || claims.preferred_username || email || claims.sub || '').trim();
     const subject = String(claims.sub || '').trim();
     if (!subject && !email) throw new AppError(401, 'OIDC_IDENTITY_MISSING', 'OIDC 身份缺少 sub/email');
-    return { subject: subject || email, email, name: name || subject, tenant, role };
+
+    const amr = claimList(claims[settings.amrClaim] ?? claims.amr);
+    const mfa = amr.some((value) => ['mfa', 'hwk', 'totp', 'swk', 'otp', 'pwd+mfa'].includes(value.toLowerCase()));
+    if (settings.mfaRequired && !mfa) {
+      throw new AppError(403, 'OIDC_MFA_REQUIRED', 'SSO 登录要求多因素认证：IdP 需在 amr 声明 mfa / totp / hwk');
+    }
+    return { subject: subject || email, email, name: name || subject, tenant, role, groups, amr, mfa };
   }
 
   function loginUrl({ state, codeChallenge, redirectUri }) {

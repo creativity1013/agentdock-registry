@@ -120,6 +120,10 @@ export function loadConfig(env = process.env, overrides = {}) {
       tenantClaim: String(overrides.oidc?.tenantClaim ?? env.AGENTDOCK_OIDC_TENANT_CLAIM ?? 'tenant'),
       roleClaim: String(overrides.oidc?.roleClaim ?? env.AGENTDOCK_OIDC_ROLE_CLAIM ?? 'role'),
       defaultRole: oidcDefaultRole,
+      groupsClaim: String(overrides.oidc?.groupsClaim ?? env.AGENTDOCK_OIDC_GROUPS_CLAIM ?? 'groups'),
+      groupRoleMap: parseGroupRoleMap(overrides.oidc?.groupRoleMap, env.AGENTDOCK_OIDC_GROUP_ROLES),
+      mfaRequired: Boolean(overrides.oidc?.mfaRequired ?? env.AGENTDOCK_OIDC_MFA_REQUIRED === '1'),
+      amrClaim: String(overrides.oidc?.amrClaim ?? env.AGENTDOCK_OIDC_AMR_CLAIM ?? 'amr'),
     },
     audit: {
       maxBytes: auditMaxBytes,
@@ -148,6 +152,29 @@ export function ensureDataLayout(config) {
   for (const dir of [config.dataDir, config.files.packages]) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+/** 环境变量 AGENTDOCK_OIDC_GROUP_ROLES 形如 "agents-admins=admin,reviewers=reviewer" */
+function parseGroupRoleMap(raw, envValue) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return Object.fromEntries(
+      Object.entries(raw)
+        .map(([group, role]) => [String(group).trim(), String(role).trim()])
+        .filter(([group, role]) => group && ['viewer', 'publisher', 'reviewer', 'admin'].includes(role)),
+    );
+  }
+  const text = String(envValue ?? '').trim();
+  if (!text) return {};
+  const map = {};
+  for (const part of text.split(',')) {
+    const [group, role] = part.split('=').map((value) => value.trim());
+    if (!group || !role) continue;
+    if (!['viewer', 'publisher', 'reviewer', 'admin'].includes(role)) {
+      throw new Error(`AGENTDOCK_OIDC_GROUP_ROLES 中的角色只能是 viewer/publisher/reviewer/admin：${part}`);
+    }
+    map[group] = role;
+  }
+  return map;
 }
 
 function readOwnVersion() {
