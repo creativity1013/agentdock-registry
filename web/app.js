@@ -1210,50 +1210,50 @@ async function renderReview(main) {
     },
   }, h('option', { value: '' }, '全部类型'), ...Object.entries(KIND_LABEL).map(([value, label]) => h('option', { value }, label)));
   kindSelect.value = state.reviewKind;
-  const riskSelect = h('select', {
-    onChange: () => {
-      state.reviewRisk = riskSelect.value;
-      render();
-    },
-  },
-    h('option', { value: 'all' }, '全部风险'),
-    h('option', { value: 'attention' }, '需关注（高/中危）'),
-    h('option', { value: 'clean' }, '扫描干净'));
-  riskSelect.value = state.reviewRisk;
 
-  const filtered = items.filter((item) => {
-    if (state.reviewKind && item.kind !== state.reviewKind) return false;
-    const bucket = riskBucketOf(item);
-    if (state.reviewRisk === 'attention' && bucket !== 'high' && bucket !== 'medium') return false;
-    if (state.reviewRisk === 'clean' && bucket !== 'clean') return false;
-    return true;
-  });
+  const kindItems = items.filter((item) => !state.reviewKind || item.kind === state.reviewKind);
+  const counts = { all: kindItems.length, high: 0, medium: 0, low: 0, clean: 0 };
+  for (const item of kindItems) counts[riskBucketOf(item)] += 1;
+  const active = state.reviewRisk || 'all';
+  const bucketLabel = (id) => (id === 'all' ? '全部' : REVIEW_BUCKETS.find((bucket) => bucket.id === id).title);
 
-  const counts = { high: 0, medium: 0, low: 0, clean: 0 };
-  for (const item of items) counts[riskBucketOf(item)] += 1;
+  const tabs = h('div', { class: 'toolbar risk-tabs' },
+    ...['all', ...REVIEW_BUCKETS.map((bucket) => bucket.id)].map((id) => h('button', {
+      class: `btn btn-sm risk-tab risk-${id}${active === id ? ' active' : ''}`,
+      type: 'button',
+      onClick: () => {
+        state.reviewRisk = id;
+        render();
+      },
+    }, `${bucketLabel(id)} ${counts[id]}`)),
+    kindSelect,
+    h('button', { class: 'btn btn-sm', type: 'button', onClick: () => render() }, '刷新'));
+
+  const filtered = kindItems.filter((item) => active === 'all' || riskBucketOf(item) === active);
 
   const groups = REVIEW_BUCKETS.map((bucket) => {
     const bucketItems = filtered.filter((item) => riskBucketOf(item) === bucket.id);
     if (bucketItems.length === 0) return null;
     return h('section', { class: 'review-group' },
-      h('div', { class: 'group-title' },
+      h('div', {
+        class: 'group-title clickable',
+        title: `只看「${bucket.title}」`,
+        onClick: () => {
+          state.reviewRisk = active === bucket.id ? 'all' : bucket.id;
+          render();
+        },
+      },
         h('span', { class: `chip risk-${bucket.id}` }, `${bucket.title} ${bucketItems.length}`),
         h('span', { class: 'muted' }, bucket.hint)),
       h('div', { class: 'list' }, ...bucketItems.map(reviewRow)));
   }).filter(Boolean);
 
-  const toolbar = h('div', { class: 'toolbar' },
-    ...REVIEW_BUCKETS.map((bucket) => h('span', { class: `chip risk-${bucket.id}` }, `${bucket.title} ${counts[bucket.id]}`)),
-    kindSelect,
-    riskSelect,
-    h('button', { class: 'btn', type: 'button', onClick: () => render() }, '刷新'));
-
   main.replaceChildren(
     h('div', { class: 'section-title' },
       h('h2', {}, '待审核'),
-      h('span', { class: 'muted' }, `共 ${data.total} 个版本 · 按扫描结果分组`)),
-    toolbar,
-    groups.length ? h('div', { class: 'review-groups' }, ...groups) : h('div', { class: 'empty' }, items.length ? '当前筛选下没有版本' : '没有待审核的版本'),
+      h('span', { class: 'muted' }, `共 ${data.total} 个版本 · 当前显示 ${filtered.length} 个 · 按扫描结果分类`)),
+    tabs,
+    groups.length ? h('div', { class: 'review-groups' }, ...groups) : h('div', { class: 'empty' }, items.length ? '该分类下没有版本' : '没有待审核的版本'),
   );
 }
 

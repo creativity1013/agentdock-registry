@@ -1180,3 +1180,50 @@ pre.code {
   border-color: rgba(61, 220, 151, 0.45);
   background: rgba(61, 220, 151, 0.1);
 }
+
+/* 待审核：可点击的风险分类标签 */
+.risk-tabs {
+  flex-wrap: wrap;
+}
+
+.risk-tab {
+  border-color: var(--border);
+}
+
+.risk-tab.active {
+  color: var(--text);
+  border-color: var(--primary);
+  background: rgba(79, 140, 255, 0.16);
+}
+
+.risk-tab.risk-high.active {
+  color: #ff8a8a;
+  border-color: var(--red);
+  background: rgba(255, 107, 107, 0.16);
+}
+
+.risk-tab.risk-medium.active {
+  color: #ffc873;
+  border-color: var(--amber);
+  background: rgba(255, 184, 77, 0.16);
+}
+
+.risk-tab.risk-low.active {
+  color: #8ab6ff;
+  border-color: var(--primary);
+  background: rgba(79, 140, 255, 0.16);
+}
+
+.risk-tab.risk-clean.active {
+  color: #7ee8b8;
+  border-color: var(--green);
+  background: rgba(61, 220, 151, 0.16);
+}
+
+.group-title.clickable {
+  cursor: pointer;
+}
+
+.group-title.clickable:hover .chip {
+  filter: brightness(1.25);
+}
