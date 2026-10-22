@@ -1015,16 +1015,24 @@ function actionControls(pkg, selected) {
     });
     const force = h('input', { type: 'checkbox', id: 'install-force' });
     const localCmd = h('code', { class: 'cmd' }, '');
-    const syncLocalCommand = () => {
+    const buildLocalCommand = (withToken) => {
       const target = targetSelect.value;
       const dirPart = target === 'dir' ? ' --dir ./agentdock-installed' : '';
-      localCmd.textContent = `agentdock install ${pkg.kind}/${pkg.name}@${selected.version} --target ${target}${dirPart}`;
+      let cmd = `agentdock install ${pkg.kind}/${pkg.name}@${selected.version} --target ${target}${dirPart}`;
+      if (withToken) {
+        cmd += ` --url ${location.origin}`;
+        if (state.token) cmd += ` --token ${state.token}`;
+      }
+      return cmd;
+    };
+    const syncLocalCommand = () => {
+      localCmd.textContent = buildLocalCommand(false);
     };
     syncLocalCommand();
     targetSelect.addEventListener('change', syncLocalCommand);
     dirInput.addEventListener('input', syncLocalCommand);
     nodes.push(
-      h('span', { class: 'hint' }, '成员本机安装（复制到成员自己的机器执行；用下面的下拉框改变目标类型）：'),
+      h('span', { class: 'hint' }, '成员本机安装（复制含令牌的命令，直接在终端执行；用下面的下拉框改变目标类型）：'),
       h('div', { class: 'cmd-row' },
         localCmd,
         h('button', {
@@ -1032,8 +1040,8 @@ function actionControls(pkg, selected) {
           type: 'button',
           onClick: async () => {
             try {
-              await navigator.clipboard.writeText(localCmd.textContent);
-              toast('命令已复制', 'ok');
+              await navigator.clipboard.writeText(buildLocalCommand(true));
+              toast(state.token ? '命令已复制（含你的访问令牌）' : '命令已复制', 'ok');
             } catch {
               toast('复制失败，请手动选择命令文本', 'error');
             }

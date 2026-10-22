@@ -27,6 +27,19 @@ AgentDock 不做 runtime、也不自研能力格式，只做生态里最缺的�
 - 市场体验：Web 界面分页浏览 + 服务端搜索、markdown 安全渲染、待审核版本的 diff 视图（文件级 + 逐行差异）；待审核队列按扫描风险分组（高危 / 中危 / 低危 / 干净）并支持类型与风险筛选
 - 策略可视化：管理员可在 Web「策略」页直接编辑自动审批规则（类型/受信发布者/签名要求/扫描阈值/体积上限），保存即生效并留审计
 
+## 安装 CLI（可选但推荐）
+
+源码目录内的 `bin/agentdock` 可直接用，或把 CLI 链接为全局命令 `agentdock`：
+
+```bash
+cd agentdock
+npm link                       # 之后在任意目录可直接执行 agentdock
+# 或：把本仓库 bin 加入 PATH
+# echo 'export PATH="$HOME/Documents/deepseek-harness/default-workspace/agentdock/bin:$PATH"' >> ~/.zshrc
+```
+
+> Web「成员本机安装」的复制按钮会生成带 `--url` / `--token` 的完整命令，粘贴即可执行；前提是 `agentdock` 已可用（`npm link` 或 PATH）。
+
 ## 快速开始
 
 要求 Node.js ≥ 20.11（推荐 22/24），无需 `npm install`。

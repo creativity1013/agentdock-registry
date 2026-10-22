@@ -1,0 +1,3 @@
+#!/bin/sh
+# AgentDock CLI launcher（从源码目录运行，无需 npm link）
+exec node "$(dirname "$0")/../cli/agentdock.mjs" "$@"
