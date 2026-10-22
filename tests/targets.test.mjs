@@ -10,6 +10,7 @@ import {
   resolveTargetBase,
   installDestination,
   listTargets,
+  listInstalls,
   TARGET_IDS,
 } from '../src/targets.mjs';
 import { AppError } from '../src/errors.mjs';
@@ -165,4 +166,43 @@ test('listTargets 包含 dsh-agent', () => {
     path.join('/tmp/h', '.dsh', 'agentdock', 'presets'),
   );
   assert.equal(resolveTargetBase('dsh-agent', { home: '/tmp/h' }), path.join('/tmp/h', '.dsh'));
+});
+
+test('listInstalls 扫描安装清单', (t) => {
+  const home = withHome(t);
+  const bundle = skillBundle();
+  const dshPlan = planInstall(bundle, { target: 'dsh', home, force: true });
+  applyInstall(dshPlan);
+  const claudeAgent = {
+    kind: 'agent',
+    name: 'reviewer',
+    version: '0.2.0',
+    files: [
+      {
+        path: 'agent.md',
+        encoding: 'utf8',
+        content: '---\nname: reviewer\ndescription: review agent\ntools: [Read]\n---\nYou review code.',
+      },
+    ],
+  };
+  applyInstall(planInstall(claudeAgent, { target: 'claude', home, force: true }));
+
+  const installs = listInstalls({ home, targets: ['dsh', 'claude'] });
+  assert.equal(installs.length, 2);
+  const skill = installs.find((item) => item.kind === 'skill' && item.target === 'dsh');
+  assert.ok(skill);
+  assert.equal(skill.name, 'demo-skill');
+  assert.equal(skill.version, '0.1.0');
+  assert.ok(skill.manifestPath.endsWith('.agentdock-install.json'));
+  const agent = installs.find((item) => item.kind === 'agent' && item.target === 'claude');
+  assert.ok(agent);
+  assert.ok(agent.manifestPath.endsWith('reviewer.agentdock.json'));
+  assert.ok(agent.installedAt);
+
+  const dir = path.join(home, 'custom');
+  applyInstall(planInstall(bundle, { target: 'dir', home, dir, force: true }));
+  const dirInstalls = listInstalls({ home, dir, targets: ['dir'] });
+  assert.equal(dirInstalls.length, 1);
+  assert.equal(dirInstalls[0].target, 'dir');
+  assert.equal(dirInstalls[0].name, 'demo-skill');
 });

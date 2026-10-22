@@ -245,7 +245,7 @@ data/
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
 | `src/diff.mjs` | 行级/文件级差异（LCS + 规模上限降级） | `diffLines`、`diffBundles` |
 | `src/store.mjs` | 版本库、状态机、安装计数（元数据经 backend 持久化） | `createStore`（`publish/review/approveVersion/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature/setPolicy/getPolicy/sbom`） |
-| `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
+| `src/targets.mjs` | 安装目标解析与落盘、安装清单扫描 | `planInstall`、`applyInstall`、`installDestination`、`listTargets`、`listInstalls`（供 `outdated` / `upgrade`） |
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
 | `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
@@ -288,6 +288,8 @@ data/
 3. `planInstall()`：生成 `{dest, files[{path, targetPath, content, encoding}], force, notes}`；`applyInstall()` 原子写入（`.tmp` → rename）并写清单。
 
 冲突策略：目标已存在 → `AppError(409)`；`force` 时只覆盖同名文件，不清理旧目录中的多余文件。
+
+`listInstalls({home, dir, targets})` 反向读取这些清单（dir 布局读 `<dir>/.agentdock-install.json`，Claude agent / dsh-agent 读 `<name>.agentdock.json`），供 CLI `outdated` 与 `upgrade` 使用：`outdated` 对比服务端 `latestVersion`，`upgrade` 复用 `planInstall(force: true)` 覆盖安装。清单只含包名/版本/时间，不记录文件哈希，因此升级检查不会发现本地文件被手工修改（完整性校验请用 `verify-signature`）。
 
 ## 7. 与 DSH 集成
 

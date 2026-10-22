@@ -171,6 +171,21 @@ async function main() {
   assert(transparencyProof.includes('本地校验：✓ 通过'), `透明日志包含证明校验失败：${transparencyProof}`);
   console.log('✓ 发布者签名 + 透明日志：keygen / 注册 / 签名发布 / 链校验 / 包含证明均正常');
 
+  // 升级检查：本地 0.1.0 安装，服务端已 0.2.0
+  const outdatedOut = await runCli(['outdated', '--target', 'dir', '--dir', installDir], tokens.publisher);
+  assert(outdatedOut.includes('有更新'), `outdated 未发现更新：\n${outdatedOut}`);
+  assert(outdatedOut.includes('0.1.0') && outdatedOut.includes('0.2.0'), 'outdated 版本信息不完整');
+  const upgradeOut = await runCli(
+    ['upgrade', 'skill/code-reviewer', '--target', 'dir', '--dir', installDir],
+    tokens.publisher,
+  );
+  assert(upgradeOut.includes('已升级') && upgradeOut.includes('0.2.0'), `upgrade 输出异常：\n${upgradeOut}`);
+  const upgradedManifest = JSON.parse(
+    fs.readFileSync(path.join(installDir, 'skills', 'code-reviewer', '.agentdock-install.json'), 'utf8'),
+  );
+  assert(upgradedManifest.package.version === '0.2.0', '升级后安装清单版本未更新');
+  console.log('✓ 版本检查与升级：outdated 发现新版本，upgrade 更新本地安装');
+
   // 外部 registry：适配器信息 + 中立市场目录导出
   const syncSources = await runCli(['sync', 'sources'], tokens.publisher);
   assert(syncSources.includes('GitHub 仓库') && syncSources.includes('MCP registry'), 'sync sources 输出异常');

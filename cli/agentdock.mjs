@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { readBundleFromDirectory, KINDS, KIND_LABEL } from '../src/bundle.mjs';
 import { analyzeInput } from '../src/pipeline.mjs';
 import { parseFrontmatter } from '../src/yaml.mjs';
-import { planInstall, applyInstall, summarizePlan, TARGET_LABEL, TARGET_IDS } from '../src/targets.mjs';
+import { planInstall, applyInstall, summarizePlan, listInstalls, TARGET_LABEL, TARGET_IDS } from '../src/targets.mjs';
 import {
   renderPresetPatch,
   upsertProfilePatch,
@@ -17,7 +17,7 @@ import {
 import { resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
 import { publisherSignaturePayload, publicKeyPemFromPrivate } from '../src/signing.mjs';
 import { verifyInclusionProof } from '../src/transparency.mjs';
-import { formatBytes } from '../src/util.mjs';
+import { compareVersions, formatBytes } from '../src/util.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_URL = 'http://127.0.0.1:7788';
@@ -38,6 +38,11 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock list [--kind skill|agent|plugin] [--q 关键词] [--status published]
   agentdock install <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--force] [--profile <profile>]
                                                    target=dsh-agent 生成 DSH preset 片段；--profile 会并入该 profile 的 cordis.patch.yml
+
+  agentdock outdated [--target <target>] [--dir <路径>] [--json]
+                                                   检查本地已安装包是否有新版本（读取安装清单）
+  agentdock upgrade <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--profile <profile>]
+                                                   升级本地安装到最新（或指定）版本，默认覆盖同名文件
 
   agentdock verify-signature <kind>/<name>[@version]
                                                    验证平台内容签名（ed25519，重算磁盘内容哈希）
@@ -437,6 +442,97 @@ async function cmdList(flags) {
     ['包', '版本', '状态', '类型', '安装', '描述'],
   );
   console.log(`\n共 ${data.total} 个包`);
+}
+
+/** 检查本地已安装包是否有新版本 */
+async function cmdOutdated(flags) {
+  const conn = resolveConnection(flags);
+  const home = resolveHome();
+  const targets = flags.target ? [String(flags.target)] : TARGET_IDS.filter((item) => item !== 'dir');
+  const installs = listInstalls({ home, dir: flags.dir, targets });
+  if (installs.length === 0) {
+    console.log('没有发现 AgentDock 安装记录。');
+    return;
+  }
+  const rows = [];
+  let updates = 0;
+  for (const inst of installs) {
+    let latest = null;
+    let error = null;
+    try {
+      const detail = await api(conn, 'GET', `/api/v1/packages/${inst.kind}/${inst.name}`);
+      latest = detail.latestVersion ?? null;
+    } catch (err) {
+      error = err.message;
+    }
+    const hasUpdate = Boolean(latest && inst.version && compareVersions(latest, inst.version) > 0);
+    if (hasUpdate) updates += 1;
+    rows.push([
+      inst.target,
+      `${inst.kind}/${inst.name}`,
+      inst.version,
+      latest ?? (error ? `! ${error}` : '-'),
+      hasUpdate ? '有更新' : error ? '查询失败' : '最新',
+      inst.installedAt ? new Date(inst.installedAt).toLocaleString('zh-CN', { hour12: false }) : '',
+    ]);
+  }
+  if (flags.json) return console.log(JSON.stringify({ installs, updates }, null, 2));
+  printTable(rows, ['目标', '包', '已安装', '最新', '状态', '安装时间']);
+  console.log(`\n共 ${installs.length} 个安装，${updates} 个有更新。`);
+  if (updates > 0) console.log('升级：agentdock upgrade <kind>/<name> --target <target>');
+}
+
+/** 升级本地已安装包到最新（或指定）版本 */
+async function cmdUpgrade(positionals, flags) {
+  const spec = parseSpec(positionals[0]);
+  const conn = resolveConnection(flags);
+  requireToken(conn);
+  const home = resolveHome();
+  const target = flags.target || 'dsh';
+  if (!TARGET_LABEL[target]) throw new Error(`未知安装目标：${target}（可选：${TARGET_IDS.join(' / ')}）`);
+  const detail = await api(conn, 'GET', `/api/v1/packages/${spec.kind}/${spec.name}`);
+  const version = spec.version || detail.latestVersion;
+  if (!version) throw new Error('该包还没有已发布版本');
+  const installed = listInstalls({ home, dir: flags.dir, targets: [target] }).find(
+    (item) => item.kind === spec.kind && item.name === spec.name,
+  );
+  if (installed && compareVersions(version, installed.version) <= 0 && !flags.force) {
+    console.log(`已是最新：${spec.kind}/${spec.name}@${installed.version}（目标 ${target}）`);
+    console.log('如需强制重装，请加 --force');
+    return;
+  }
+  const bundleData = await api(
+    conn,
+    'GET',
+    `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/bundle`,
+  );
+  const plan = planInstall(bundleData.bundle, { target, home, dir: flags.dir, force: true });
+  applyInstall(plan);
+  const summary = summarizePlan(plan, { home });
+  console.log(
+    `✓ 已升级 ${spec.kind}/${spec.name}${installed ? ` ${installed.version} → ` : ' '}${version}（${TARGET_LABEL[target]}）`,
+  );
+  console.log(`  目标目录：${summary.absolutePath}`);
+  for (const note of summary.notes) console.log(`  ! ${note}`);
+  if (summary.preset && typeof flags.profile === 'string' && flags.profile.trim()) {
+    const merged = upsertProfilePatch({
+      profile: flags.profile.trim(),
+      home,
+      presetId: summary.preset.id,
+      body: plan.preset.body,
+    });
+    console.log(`✓ 已并入 profile「${flags.profile.trim()}」：${merged.file}${merged.replaced ? '（替换旧块）' : ''}`);
+  }
+  try {
+    await api(
+      conn,
+      'POST',
+      `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/install-event`,
+      { target },
+    );
+  } catch (error) {
+    console.error(`  ! 安装计数上报失败（不影响升级）：${error.message}`);
+  }
 }
 
 async function cmdInstall(positionals, flags) {
@@ -1107,6 +1203,10 @@ async function main() {
       return cmdList(flags);
     case 'install':
       return cmdInstall(positionals, flags);
+    case 'outdated':
+      return cmdOutdated(flags);
+    case 'upgrade':
+      return cmdUpgrade(positionals, flags);
     case 'review':
       return cmdReview(positionals, flags);
     case 'audit':

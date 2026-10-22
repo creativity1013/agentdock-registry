@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ensureDir, nowIso, writeFileAtomic } from './util.mjs';
+import { ensureDir, nowIso, readJson, writeFileAtomic } from './util.mjs';
 import { badRequest, conflict, notFound } from './errors.mjs';
 import { dshHome, renderPresetPatch } from './dsh-preset.mjs';
 
@@ -190,6 +190,73 @@ export function applyInstall(plan) {
     manifestPath: plan.manifestPath,
     notes: plan.notes,
   };
+}
+
+/**
+ * 扫描本地已安装的能力包（读取安装清单）。
+ * @param {{home?:string, dir?:string, targets?:string[]}} options
+ */
+export function listInstalls({ home = os.homedir(), dir, targets = TARGET_IDS } = {}) {
+  const results = [];
+  const pushManifest = (target, base, manifestPath, expectedKind = null) => {
+    let manifest;
+    try {
+      manifest = readJson(manifestPath, null);
+    } catch {
+      return;
+    }
+    const pkg = manifest?.package;
+    if (!pkg?.kind || !pkg?.name || !pkg?.version) return;
+    if (expectedKind && pkg.kind !== expectedKind) return;
+    results.push({
+      target,
+      baseDir: base,
+      manifestPath,
+      kind: pkg.kind,
+      name: pkg.name,
+      version: pkg.version,
+      installedAt: manifest.installedAt ?? null,
+    });
+  };
+
+  for (const target of targets) {
+    if (!TARGET_IDS.includes(target)) continue;
+    if (target === 'dir' && !dir) continue;
+    const base = resolveTargetBase(target, { home, dir });
+
+    if (target === 'dsh-agent') {
+      const presetDir = path.join(base, 'agentdock', 'presets');
+      for (const entry of readDirSafe(presetDir)) {
+        if (entry.isFile() && entry.name.endsWith('.agentdock.json')) {
+          pushManifest(target, base, path.join(presetDir, entry.name), 'agent');
+        }
+      }
+      continue;
+    }
+
+    for (const kind of ['skill', 'agent', 'plugin']) {
+      const kindDir = path.join(base, KIND_SUBDIR[kind]);
+      for (const entry of readDirSafe(kindDir)) {
+        if (entry.isDirectory()) {
+          pushManifest(target, base, path.join(kindDir, entry.name, '.agentdock-install.json'), kind);
+        } else if (entry.isFile() && entry.name.endsWith('.agentdock.json')) {
+          pushManifest(target, base, path.join(kindDir, entry.name), kind);
+        }
+      }
+    }
+  }
+
+  return results.sort((a, b) =>
+    `${a.target}/${a.kind}/${a.name}`.localeCompare(`${b.target}/${b.kind}/${b.name}`),
+  );
+}
+
+function readDirSafe(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
 }
 
 /** 供 API / CLI 展示的安装计划（隐藏主机绝对路径前缀） */
