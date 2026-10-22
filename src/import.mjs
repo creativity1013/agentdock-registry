@@ -181,19 +181,13 @@ export function splitFolderPackages(files) {
   const roots = manifestRootsOf(files);
   if (roots.length === 0) return [{ root: '', files }];
   if (roots.includes('')) return [{ root: '', files }];
-  if (roots.length === 1) {
-    const root = roots[0];
-    return [{
-      root,
-      files: files.filter((file) => file.path.startsWith(`${root}/`)).map((file) => ({ ...file, path: file.path.slice(root.length + 1) })),
-    }];
-  }
-  const topLevel = roots.every((root) => root.split('/').length === 1);
-  if (!topLevel) return [{ root: '', files }];
-  return roots.map((root) => ({
-    root,
-    files: files.filter((file) => file.path.startsWith(`${root}/`)).map((file) => ({ ...file, path: file.path.slice(root.length + 1) })),
-  }));
+  // 只保留最外层包根：plugin/plugin.json 与 plugin/skills/x/SKILL.md 属于同一个包
+  const minimalRoots = roots.filter((root) => !roots.some((other) => other !== root && root.startsWith(`${other}/`)));
+  const strip = (root) => files
+    .filter((file) => file.path.startsWith(`${root}/`))
+    .map((file) => ({ ...file, path: file.path.slice(root.length + 1) }));
+  if (minimalRoots.length === 1) return [{ root: minimalRoots[0], files: strip(minimalRoots[0]) }];
+  return minimalRoots.map((root) => ({ root, files: strip(root) }));
 }
 
 async function finalizeSinglePackage(files, { filename, overrides, format, hints = {} } = {}) {
@@ -222,6 +216,10 @@ async function finalizeSinglePackage(files, { filename, overrides, format, hints
 async function finalizeFromFiles(files, { filename, overrides, format, hints = {} } = {}) {
   const cleaned = cleanImportFiles(files);
   if (cleaned.length === 0) throw new ArchiveError('没有可导入的文件（隐藏文件、.git、node_modules 等已被过滤）');
+  if (manifestRootsOf(cleaned).length === 0) {
+    const tops = [...new Set(cleaned.map((file) => file.path.split('/')[0]))].slice(0, 8);
+    throw new ArchiveError(`没有找到清单文件（SKILL.md / agent.md / plugin.json）。当前文件/目录：${tops.join('、') || '（空）'}`);
+  }
   const folders = splitFolderPackages(cleaned);
   if (folders.length > 1) {
     const packages = [];

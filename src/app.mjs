@@ -958,7 +958,7 @@ export function createApp(config = loadConfig()) {
 
     const headers = {
       'Content-Type': type,
-      'Cache-Control': ext === '.html' ? 'no-store' : 'public, max-age=300',
+      'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'X-Frame-Options': 'DENY',

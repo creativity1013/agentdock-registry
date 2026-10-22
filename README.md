@@ -251,13 +251,21 @@ my-plugin/
 
 | 规则组 | 覆盖内容 |
 | --- | --- |
-| `PI-*` | 提示注入、越狱、要求隐瞒用户、绕过安全策略 |
-| `EX-*` | 把本地数据/凭据外发到网络 |
-| `SEC-*` | AWS/GitHub/API 密钥、私钥、凭据文件路径 |
-| `SH-*` | `rm -rf /`、`curl \| sh`、fork bomb、`sudo`、`chmod 777`、危险跳过权限参数 |
-| `HID-*` | HTML 注释隐藏指令、零宽字符、超长 base64 载荷 |
+| `PI-*`（8 条） | 提示注入、越狱、要求隐瞒用户、绕过安全策略；中英文双语措辞（`忽略之前的指令` 等）、条件触发型注入（`当用户……时`）与伪装系统提示 |
+| `EX-*`（4 条） | 把本地数据/凭据外发到网络；webhook 收集端点（webhook.site/requestbin 等）、curl/nc 数据外流、已知遥测上报域名 |
+| `SEC-*`（10 条） | AWS/GitHub/API 密钥、私钥、数据库连接串、JWT、Bot token、现代 key 格式（`sk-`/`xox`/`AKIA`/Google AI 等）；凭据类文件名（`.env`、`credentials*`，结构检查） |
+| `SH-*`（8 条） | `rm -rf /`、`curl \| sh`、fork bomb、`sudo`、`chmod 777`、危险跳过权限参数；磁盘擦除（`mkfs`/`dd if=/dev/zero`）与计划任务植入（crontab/launchd） |
+| `EXEC-*`（2 条） | 动态执行：`eval`/`new Function`/`execSync` 拼接、混淆后解码执行（base64 → shell） |
+| `PER-*`（4 条） | 持久化与 harness 配置篡改：写入 shell rc / crontab / launchd / systemd、改 `CLAUDE.md`/`settings.json` 等 harness 配置、`authorized_keys`、`.ssh` 植入 |
+| `HID-*`（6 条） | HTML 注释隐藏指令、零宽字符、超长 base64 载荷；Trojan Source 双向控制符、西里尔同形字混淆、高熵 blob |
 | `NET-*` | 读取 `process.env` 中的密钥并外发 |
+| `MET-*`（3 条，结构检查） | `MET-001` description 字段投毒（模型会读到的简介含指令/外发措辞）；`MET-002` 插件 `package.json` 含 npm 生命周期脚本（preinstall/postinstall = 任意代码执行）；`MET-003` agent 同时持有 shell + 网络工具（组合风险） |
 | `BIN-*` | 二进制文件（不解析内容，仅提示） |
+
+除内容规则外，服务端在发布时还做两层**供应链检查**（`SUP-*`，需要数据库上下文，不在 `verify` 离线扫描里）：
+
+- `SUP-001`（中危）：新包名与同租户已有包名编辑距离 ≤ 2（≥5 字符才比对）——**抢注/仿冒嫌疑**，仅提示不阻断，交人工审核
+- `SUP-002`：与该包最近一个非拒绝版本的 **diff 增量** 单独扫描——旧版本干净、更新里夹带高危内容（典型供应链投毒手法）时按高危阻断；结果里的 `scan.diff.base` 记录比对基准版本
 
 ## 安装目标
 
@@ -757,7 +765,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
 - **限流**：`/api/*` 与 OIDC 登录端点按 IP 滑动窗口限流（默认 300/分钟、登录 20/分钟），超限返回 429 + `Retry-After`；`AGENTDOCK_RATE_LIMIT=0` 可关闭。进程内计数，多实例部署需在网关层再做全局限流。
 - **CSRF**：SSO Cookie 会话的写操作（POST/PUT/PATCH/DELETE）必须携带双提交令牌 `x-agentdock-csrf`（值等于非 HttpOnly 的 `agentdock_csrf` Cookie），并校验 `Origin` 与 `Host` 一致；Bearer 令牌客户端不受影响。
-- 扫描是**启发式规则**，不是沙箱：绕过规则注入的能力包仍可能危险，审核环节不可省。
+- 扫描是**启发式规则 + 结构检查 + 供应链比对**（规则组见「审核与安全扫描」），不是沙箱：静态规则抓不住语义级/条件触发注入的全部变体，审核环节不可省。
 - **内容签名**：版本审核通过时，平台用 ed25519 私钥对规范化载荷 `agentdock-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名；私钥存于 `data/signing-key.json`（600 权限，务必备份），公钥通过 `GET /api/v1/keys` 公开，任何人可离线验签。`verify-signature` / `?verify=1` 会同时重算磁盘内容哈希，能发现发布后对存储内容的替换或篡改。
 - 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源。
 - **发布者签名（可选）**：`publish --key` 用发布者自己持有的 ed25519 私钥对载荷 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥发布时自动 TOFU 注册（等价于 `POST /api/v1/me/keys`）。签名覆盖内容哈希，因此可证明「该版本由持有对应私钥的人提交」。

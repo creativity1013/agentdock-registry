@@ -43,7 +43,7 @@ normalizeBundle()                   路径消毒、名称/semver 校验、体积
   ▼
 validateBundle()                    按 kind 校验结构，产出 manifest（供市场/安装使用）
   ▼
-scanBundle() + scanVerdict()        安全规则扫描，按阈值判定是否阻断
+scanBundle() + scanVerdict()        安全规则扫描（内容/结构/隐藏指令），按阈值判定是否阻断
   ▼
 store.publish()                     归一化后的内容落盘（files/ + meta.json）
   ├ 生成 SBOM（sbom.json + version.sbom，含文件哈希与组件清单）
@@ -253,7 +253,7 @@ data/
 | `src/yaml.mjs` | 零依赖 YAML 子集 + frontmatter 解析 | `parseYaml`、`parseFrontmatter`、`YamlError` |
 | `src/bundle.mjs` | 输入归一化、路径消毒、哈希、目录读取 | `normalizeBundle`、`readBundleFromDirectory`、`sanitizePath`、`LIMITS` |
 | `src/validate.mjs` | 三类 kind 结构校验 → manifest | `validateBundle`、`describeBundle`、`KNOWN_AGENT_TOOLS` |
-| `src/scan.mjs` | 安全规则引擎 | `scanBundle`、`scanVerdict`、`SEVERITY_ORDER` |
+| `src/scan.mjs` | 安全规则引擎：内容规则（PI/EX/SEC/SH/EXEC/PER/HID/NET/BIN）+ 结构检查（MET：description 投毒、npm 生命周期脚本、agent 工具组合）+ 增量扫描 | `scanBundle`、`scanChanges`、`scanVerdict`、`SEVERITY_ORDER` |
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
 | `src/diff.mjs` | 行级/文件级差异（LCS + 规模上限降级） | `diffLines`、`diffBundles` |
 | `src/store.mjs` | 版本库、状态机、安装计数（元数据经 backend 持久化） | `createStore`（`publish/review/approveVersion/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature/setPolicy/getPolicy/sbom`） |
@@ -289,7 +289,7 @@ data/
 2. **体积限制**：文件数 200、单文件 512KB、总量 2MB，防止内存/磁盘 DoS。
 3. **令牌**：32 字节随机数（base64url），仅存 `sha256`；比较用 `safeEqual`（`crypto.timingSafeEqual`）。首启明文令牌写 600 文件并提示删除。
 4. **审计**：所有写操作（发布、审核、安装、令牌创建）均记录，append-only JSONL 且带 `seq/prevHash/hash` 哈希链，`/audit/verify` 读磁盘重算可发现篡改；查询支持 action/actor/target/时间范围过滤，可导出 jsonl/csv，超限自动轮转归档（链跨文件连续）。
-5. **扫描**：启发式规则，可配置阻断阈值；`overrideScan` 仅 admin、且事件写入审计。
+5. **扫描**：启发式规则（约 45 条，中英双语覆盖提示注入/外发/密钥/危险命令/动态执行/持久化/harness 配置篡改/隐藏字符，含 Trojan Source 与同形字），另加按文件路径与 kind 的结构检查（description 投毒、插件 npm 生命周期脚本、agent shell+网络工具组合）；可配置阻断阈值；`overrideScan` 仅 admin、且事件写入审计。发布时服务端还做供应链检查：包名与同租户已有包编辑距离 ≤ 2 → `SUP-001` 抢注嫌疑（中危，人工审核）；与最近非拒绝版本的 diff 增量单独扫描 → 旧版干净、更新夹带高危时按 `SUP-002` 阻断（结果记录 `scan.diff.base` 基准版本）。
 6. **网络**：默认仅监听 `127.0.0.1`；无内置 TLS，生产部署应置于反向代理后。
 7. **内容签名与完整性**：审核通过即用平台 ed25519 私钥签名（绑定 kind/name/version/contentHash）；公钥公开、可离线验签；验签时重算磁盘内容哈希，可发现发布后对 `packages/` 内容的替换。
 8. **发布者签名（可选）**：发布者用自有 ed25519 私钥对 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥时 TOFU 注册到 `users.json` 的 `keys[]`（等价 `POST /me/keys`）。平台签名证明「审过且未被替换」，发布者签名证明「谁提交的」。

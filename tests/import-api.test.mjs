@@ -154,6 +154,49 @@ test('文件夹包含多个能力包：批量导入并分别进入待审核', as
   assert.deepEqual(data.results.map((item) => item.package.name).sort(), ['batch-skill-a', 'batch-skill-b']);
 });
 
+test('文件夹按分组存放多个包（skills/a、skills/b）：仍批量导入', async () => {
+  const response = await fetch(`${server.url}/api/v1/import?filename=grouped.json`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: 'skills/group-a/SKILL.md', content: '---\nname: group-a\ndescription: A\n---\n\n# A\n', encoding: 'utf8' },
+        { path: 'skills/group-b/SKILL.md', content: '---\nname: group-b\ndescription: B\n---\n\n# B\n', encoding: 'utf8' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.batch, true);
+  assert.equal(data.results.length, 2);
+});
+
+test('plugin 包内含子目录 skill 时视为同一个包', async () => {
+  const response = await fetch(`${server.url}/api/v1/import?filename=my-plugin.json`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: 'my-plugin/plugin.json', content: JSON.stringify({ name: 'nested-plugin', version: '0.2.0', description: 'p' }), encoding: 'utf8' },
+        { path: 'my-plugin/skills/check/SKILL.md', content: '---\nname: check\ndescription: c\n---\n\n# c\n', encoding: 'utf8' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.batch ?? false, false);
+  assert.equal(data.package.kind, 'plugin');
+  assert.equal(data.package.name, 'nested-plugin');
+});
+
+test('文件夹里没有清单文件时给出清晰错误', async () => {
+  const { status, data } = await upload('no-manifest.json', JSON.stringify({
+    files: [{ path: 'docs/readme.md', content: '# hi', encoding: 'utf8' }],
+  }), 'application/json');
+  assert.equal(status, 422);
+  assert.match(data.error.message, /没有找到清单文件/);
+});
+
 test('dryRun：只预览不落库', async () => {
   const before = await fetch(`${server.url}/api/v1/packages?pageSize=100`).then((res) => res.json());
   const response = await fetch(`${server.url}/api/v1/import?dryRun=1&filename=dry.zip&name=dry-skill&version=0.1.0`, {
