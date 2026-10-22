@@ -609,6 +609,15 @@ export function createApp(config = loadConfig()) {
     });
   });
 
+  // 服务关闭时释放元数据后端（SQLite 需要 close 才能安全删除临时数据目录）
+  server.on('close', () => {
+    try {
+      store.close?.();
+    } catch {
+      /* 关闭失败不阻塞 */
+    }
+  });
+
   return { server, config, users, audit, store, transparency };
 }
 

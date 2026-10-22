@@ -26,6 +26,14 @@ jobs:
       - name: 端到端冒烟（真实服务 + CLI 子进程 + 落盘）
         run: npm run smoke
 
+      - name: SQLite 后端测试（Node 24+）
+        if: matrix.node == '24'
+        run: npm run test:sqlite
+
+      - name: SQLite 后端冒烟（Node 24+）
+        if: matrix.node == '24'
+        run: npm run smoke:sqlite
+
       - name: 校验示例能力包
         run: |
           for pkg in examples/*/; do

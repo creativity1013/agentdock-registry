@@ -38,6 +38,11 @@ export function loadConfig(env = process.env, overrides = {}) {
   registries.githubApi = registries.githubApi.replace(/\/+$/, '');
   registries.mcpRegistry = registries.mcpRegistry.replace(/\/+$/, '');
 
+  const backend = String(overrides.store?.backend ?? env.AGENTDOCK_STORE ?? 'json').toLowerCase();
+  if (backend !== 'json' && backend !== 'sqlite') {
+    throw new Error(`AGENTDOCK_STORE 只能是 json / sqlite：${backend}`);
+  }
+
   const config = {
     host,
     port,
@@ -50,8 +55,13 @@ export function loadConfig(env = process.env, overrides = {}) {
     version: readOwnVersion(),
     registries,
     githubToken: overrides.githubToken ?? env.GITHUB_TOKEN ?? '',
+    store: {
+      backend,
+      sqliteFile: path.join(dataDir, 'agentdock.sqlite'),
+    },
     files: {
       db: path.join(dataDir, 'db.json'),
+      sqlite: path.join(dataDir, 'agentdock.sqlite'),
       users: path.join(dataDir, 'users.json'),
       bootstrapTokens: path.join(dataDir, 'BOOTSTRAP-TOKENS.txt'),
       audit: path.join(dataDir, 'audit.log'),

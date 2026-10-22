@@ -99,6 +99,7 @@ data/
 ├── audit.log                    # append-only JSONL 审计
 ├── transparency.log             # 可验证透明日志（哈希链，append-only，审核通过时追加）
 ├── policy.json                  # 自动审批策略（可缺省；缺省等同关闭）
+├── agentdock.sqlite             # 可选 SQLite 元数据后端（AGENTDOCK_STORE=sqlite，含 -wal/-shm）
 └── packages/
     └── <kind>/<name>/<version>/
         ├── meta.json            # 版本元数据（状态、扫描、审核、文件清单、哈希、签名、SBOM 摘要）
@@ -106,6 +107,10 @@ data/
         └── files/               # 能力包原始内容（按包内相对路径）
             └── SKILL.md
 ```
+
+### metadata（db.json 或 agentdock.sqlite）
+
+元数据由 `src/backend.mjs` 抽象：默认 `db.json` 单文件；`AGENTDOCK_STORE=sqlite` 时改用内置 `node:sqlite`（关系表 `packages`/`versions`，版本完整 JSON 存 `payload` 列，WAL + 按包/版本增量写，首次启动可从 `db.json` 自动迁移）。下面以 db.json 的逻辑结构说明；SQLite 后端对外暴露同样的内存状态。
 
 ### db.json
 
@@ -228,7 +233,7 @@ data/
 | `src/scan.mjs` | 安全规则引擎 | `scanBundle`、`scanVerdict`、`SEVERITY_ORDER` |
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
 | `src/diff.mjs` | 行级/文件级差异（LCS + 规模上限降级） | `diffLines`、`diffBundles` |
-| `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/approveVersion/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature/setPolicy/getPolicy/sbom`） |
+| `src/store.mjs` | 版本库、状态机、安装计数（元数据经 backend 持久化） | `createStore`（`publish/review/approveVersion/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature/setPolicy/getPolicy/sbom`） |
 | `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
@@ -236,13 +241,15 @@ data/
 | `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
 | `src/sbom.mjs` | 版本 SBOM 生成与 digest（文件哈希 + 工具/MCP/技能组件） | `buildSbom`、`sbomDigest`、`SBOM_SCHEMA` |
 | `src/policy.mjs` | 自动审批策略：归一化/校验/规则求值/读写 | `normalizePolicy`、`evaluateAutoApproval`、`loadPolicy`、`savePolicy`、`defaultPolicy` |
+| `src/backend.mjs` | 元数据后端选择与统一接口（json / sqlite） | `createBackend`、`describeBackends`、`BACKEND_KINDS` |
+| `src/sqlite.mjs` | `node:sqlite` 后端：关系表 + WAL + db.json 自动迁移 | `createSqliteBackend`、`sqliteAvailable`、`SQLITE_SCHEMA_VERSION` |
 | `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf`）、`tokenFromRequest` |
 | `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
 | `cli/agentdock.mjs` | 命令行、本地校验、导入器 | — |
 
-依赖方向：`cli / server → app → store / targets / pipeline / diff / registry / policy / sbom → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
+依赖方向：`cli / server → app → store / targets / pipeline / diff / registry / policy / sbom → bundle / validate / scan → backend（json / sqlite）→ yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
 
 ## 5. 安全模型
 
@@ -339,7 +346,8 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 - **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency / registry / sbom / policy——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖；另覆盖策略更新权限、自动审批上架、SBOM 接口与版本详情 SBOM 摘要。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
-- **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
+- **存储后端测试**（`tests/sqlite.test.mjs`）：Node 24 上验证 SQLite 后端的发布/审核/安装持久化、重启恢复、db.json → sqlite 自动迁移与后端选择；Node 20/22 自动 skip。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。
+- **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果；`smoke:sqlite` 用 SQLite 后端跑同一套。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。
 
 ## 10. 外部 registry 同步（导入 / 导出）
@@ -403,7 +411,21 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 求值发生在 `store.publish()` 内、写完 SBOM 之后：`evaluateAutoApproval(policy, ctx)` 返回 `{approve, reasons, failed[]}`；通过则调用与人工审核相同的 `approveVersion()`（平台签名 + 透明日志 `review.auto=true` + 审计 `review.auto_approve`），否则保持 pending 并记录 `review.auto_skipped`（含每条失败规则）。策略变更写审计 `policy.update`；读取需 reviewer，修改需 admin。这样「无人值守上架」与「人工审核」共用同一状态机与可验证记录，不存在旁路。
 
-## 12. 部署形态
+## 12. 元数据存储后端（JSON / SQLite）
+
+`store.mjs` 不再直接读写 `db.json`，而是通过 `backend.mjs` 的统一接口：
+
+```
+load() -> state | savePackage(pkgKey, pkg) | saveVersion(pkgKey, versionDoc) | close() | info()
+```
+
+- **json**（默认）：进程内持有完整状态，每次写入用 `writeJsonAtomic` 重写单文件。简单、可读、适合小规模。
+- **sqlite**（`AGENTDOCK_STORE=sqlite`）：`node:sqlite` 的 `DatabaseSync`，WAL 模式；表 `packages(kind,name,description,tags,created_at,created_by,updated_at)` 与 `versions(kind,name,version,status,payload JSON)`，`status` 建索引。包内容仍是 `data/packages/<kind>/<name>/<version>/files/`（两种后端一致，安装/下载/验签逻辑不变）。
+- **迁移**：以 sqlite 启动且表为空、同时存在 `db.json` 时，自动把包与版本导入 SQLite 并写 `meta.migrated_from=db.json`；原 `db.json` 保留以便回退。
+- **写入粒度**：发布写整包（含版本）、审核/安装写单版本，不再整库重写；`server.on('close')` 会 `store.close()` 释放 SQLite 句柄并 checkpoint。
+- **取舍**：仍然在启动时把全部元数据读入内存（列表/搜索走内存），SQLite 解决的是持久化可靠性、写入成本与规模上限；若要百万级包再考虑把列表/搜索下推 SQL 或换外部数据库。`node:sqlite` 在 Node 24 仍标记 experimental（启动有警告），因此默认后端保持 json，CI 在 Node 24 上单独验证 sqlite。
+
+## 13. 部署形态
 
 | 形态 | 入口 | 说明 |
 | --- | --- | --- |

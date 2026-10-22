@@ -28,6 +28,7 @@ async function main() {
   console.log(`  市场地址   ${app.url}`);
   console.log(`  API 前缀   ${app.url}/api/v1`);
   console.log(`  数据目录   ${config.dataDir}`);
+  console.log(`  元数据后端 ${app.store.backend === 'sqlite' ? `sqlite（${config.files.sqlite}）` : 'json（db.json）'}`);
   console.log(`  初始化令牌 ${config.files.bootstrapTokens}`);
   console.log('');
   console.log('  按 Ctrl+C 停止');

@@ -334,6 +334,7 @@ my-plugin/
 | `AGENTDOCK_GITHUB_API` | `https://api.github.com` | 外部同步使用的 GitHub API 基地址（可指向内网镜像） |
 | `AGENTDOCK_MCP_REGISTRY` | `https://registry.modelcontextprotocol.io` | 外部同步使用的 MCP registry 基地址 |
 | `GITHUB_TOKEN` | — | 可选，提高 GitHub API 速率上限并访问私有仓库 |
+| `AGENTDOCK_STORE` | `json` | 元数据后端：`json`（`data/db.json`）或 `sqlite`（`data/agentdock.sqlite`，需 Node 24+ 的 `node:sqlite`） |
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
@@ -426,6 +427,22 @@ agentdock policy show                     # reviewer
 
 规则：`kinds` 白名单、`trustedPublishers` 白名单（空数组表示不限制发布者）、`requirePublisherSignature`、高危必须为 0、中危不超过 `maxMedium`、文件数/总体积上限、扫描未命中阻断阈值、且已生成 SBOM。未通过自动审批的版本会记录 `review.auto_skipped` 审计事件（含失败规则）；自动通过的版本记录 `review.auto_approve`，透明日志事件带 `review.auto: true`。
 
+## SQLite 存储后端（可选）
+
+默认元数据存 `data/db.json`（单文件，零依赖）。规模上来后可切到内置 `node:sqlite`：
+
+```bash
+AGENTDOCK_STORE=sqlite npm start
+# 或 docker： -e AGENTDOCK_STORE=sqlite
+```
+
+- 使用 Node 24+ 内置 `node:sqlite`（仍标记 experimental，启动会打印一条 ExperimentalWarning），Docker 镜像已是 node:24-alpine；Node 20/22 上不可用。
+- 关系表 `packages` / `versions` 存可查询的键（kind/name/version/status）与完整版本 JSON payload；包内容仍落盘在 `data/packages/...`，与 JSON 后端一致。
+- 开启 WAL、按包/按版本增量写（不再每次重写整个索引）。
+- 首次以 sqlite 启动时，如果存在旧的 `db.json` 且 sqlite 为空，会自动迁移（记录 `meta.migrated_from=db.json`，原文件保留，可回退）。
+- 备份：`data/` 目录（含 `agentdock.sqlite` 及其 `-wal`/`-shm`）整体备份；SQLite 模式下建议停服或用 `sqlite3 .backup`。
+- 测试：`npm run test:sqlite`、`npm run smoke:sqlite`（CI 在 Node 24 矩阵上执行）。
+
 ## 部署（Docker / CI）
 
 ### Docker
@@ -475,6 +492,8 @@ agentdock/
 │   ├── registry.mjs         # 外部 registry 互操作（GitHub / MCP registry 导入 + 市场目录导出）
 │   ├── sbom.mjs             # SBOM 生成（文件哈希 + 工具/MCP/技能组件 + digest）
 │   ├── policy.mjs           # 自动审批策略（归一化/校验/规则求值）
+│   ├── backend.mjs          # 元数据后端选择（json / sqlite 统一接口）
+│   ├── sqlite.mjs           # node:sqlite 后端（关系表 + WAL + db.json 自动迁移）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
 │   ├── config.mjs           # 配置与数据目录
@@ -485,7 +504,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（84 个用例）
+├── tests/                   # node:test 测试（87 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -503,7 +522,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 
 - **零依赖**：只用 Node 标准库（`node:http`、`node:test`、`fetch`），离线环境可直接跑；代价是 YAML 解析器、路由等需要自己维护子集实现。
 - **JSON bundle 而非 multipart/tar/zip**：上传/下载都是普通 JSON，方便 CLI、CI、脚本复用；代价是大包体积略增。
-- **文件系统存储而非数据库**：元数据 `db.json` + 内容按版本落盘，便于备份/审查/手工检查；代价是全量索引常驻内存（适合几千个包规模）。
+- **文件系统为主 + 可选 SQLite 元数据后端**：内容始终按版本落盘（便于备份/审查/手工检查），元数据默认 `db.json` 单文件、可切 `node:sqlite` 关系表（WAL、增量写、自动迁移）；两种后端都保留内存索引，代价是启动时全量加载元数据。
 - **外部同步只做拉取 + 中立导出**：不对第三方 registry 做写操作（避免各平台 API/鉴权差异与误写风险），导入内容一律走同一条校验/扫描/审核流水线；导出采用 `agentdock-marketplace@1` 中立格式，由其他 harness 映射。
 - **静态市场前端**：原生 JS，无构建步骤；markdown 渲染与 diff 视图都是轻量子集实现（渲染只创建文本节点防 XSS，diff 用 LCS 并对超大输入降级），代价是语法支持有限（不支持表格/脚注等扩展）。
 
@@ -530,7 +549,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
 - [x] 外部 registry 互操作：GitHub / MCP registry 导入 + 中立市场目录导出（skills.sh 的 `SKILL.md` 可经 GitHub 导入）
 - [x] 依赖清单与 SBOM、按策略自动审批（`data/policy.json` + `review.auto_approve`）
-- [ ] SQLite 存储后端（>1 万包规模）
+- [x] SQLite 存储后端（`AGENTDOCK_STORE=sqlite`，node:sqlite + WAL + db.json 自动迁移）
 
 ## License
 

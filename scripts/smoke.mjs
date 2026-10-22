@@ -46,7 +46,7 @@ function assert(condition, message) {
 }
 
 async function main() {
-  const config = loadConfig({}, { port: 0, host: '127.0.0.1', dataDir: path.join(root, 'data'), home });
+  const config = loadConfig(process.env, { port: 0, host: '127.0.0.1', dataDir: path.join(root, 'data'), home });
   server = await startServer(config);
   const tokens = Object.fromEntries((server.users.bootstrap || []).map((entry) => [entry.name, entry.token]));
   assert(tokens.admin && tokens.reviewer && tokens.publisher, '应生成 admin/reviewer/publisher 初始化令牌');
@@ -213,6 +213,7 @@ async function main() {
   console.log('');
   console.log('SMOKE OK');
   console.log(`  市场：${server.url}`);
+  console.log(`  元数据后端：${server.store.backend}`);
   console.log(`  数据：${JSON.stringify(stats)}`);
 }
 

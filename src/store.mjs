@@ -2,13 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ensureDir,
-  readJson,
   writeJsonAtomic,
   writeFileAtomic,
   nowIso,
   sha256,
   compareVersions,
 } from './util.mjs';
+import { createBackend } from './backend.mjs';
 import { KINDS, KIND_LABEL, isValidName, computeContentHash } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
 import { analyzeInput } from './pipeline.mjs';
@@ -38,12 +38,8 @@ export function createStore(config, { audit, users, transparency } = {}) {
   ensureDataLayout(config);
   const dbFile = config.files.db;
   const packagesDir = config.files.packages;
-
-  let db = null;
-  if (fs.existsSync(dbFile)) db = readJson(dbFile);
-  if (!db || typeof db !== 'object' || !db.packages || typeof db.packages !== 'object') {
-    db = { schemaVersion: 1, packages: {} };
-  }
+  const backend = createBackend(config);
+  const db = backend.load();
 
   let signingKey = null;
   let autoPolicy = defaultPolicy();
@@ -63,7 +59,8 @@ export function createStore(config, { audit, users, transparency } = {}) {
     return signingKey;
   };
 
-  const persist = () => writeJsonAtomic(dbFile, db);
+  const persistPackage = (pkgKey, pkg) => backend.savePackage(pkgKey, pkg);
+  const persistVersion = (kind, name, versionDoc) => backend.saveVersion(`${kind}/${name}`, versionDoc);
   const keyOf = (kind, name) => `${kind}/${name}`;
   const versionDir = (kind, name, version) => path.join(packagesDir, kind, name, version);
   const filesDir = (kind, name, version) => path.join(versionDir(kind, name, version), 'files');
@@ -226,7 +223,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
     if (bundle.tags.length > 0) pkg.tags = bundle.tags;
     pkg.updatedAt = submittedAt;
     pkg.versions[bundle.version] = versionDoc;
-    persist();
+    persistPackage(pkgKey, pkg);
 
     audit?.append({
       actor,
@@ -290,7 +287,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       auto,
     };
     versionDoc.signature = signature;
-    persist();
+    persistVersion(kind, name, versionDoc);
     audit?.append({
       actor,
       role,
@@ -336,7 +333,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       reviewer: actor,
       reviewedAt: nowIso(),
     };
-    persist();
+    persistVersion(kind, name, versionDoc);
     audit?.append({
       actor,
       role,
@@ -615,7 +612,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
   function recordInstall(kind, name, version, { actor = 'unknown', ip = '', target = '' } = {}) {
     const versionDoc = requirePublished(kind, name, version);
     versionDoc.installs = (versionDoc.installs || 0) + 1;
-    persist();
+    persistVersion(kind, name, versionDoc);
     audit?.append({
       actor,
       role: '',
@@ -658,6 +655,9 @@ export function createStore(config, { audit, users, transparency } = {}) {
   return {
     dbFile,
     packagesDir,
+    backend: backend.kind,
+    backendInfo: () => backend.info(),
+    close: () => backend.close(),
     setPolicy,
     getPolicy,
     sbom,
