@@ -974,3 +974,57 @@ pre.code {
 .diff-line.same {
   opacity: 0.72;
 }
+
+/* ------------------------------ 策略编辑 ------------------------------ */
+
+.form-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  align-items: start;
+}
+
+.form-row:first-of-type {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+.form-label {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding-top: 8px;
+}
+
+.form-row input[type='number'],
+.form-row textarea {
+  width: min(100%, 460px);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.form-row textarea {
+  resize: vertical;
+  min-height: 64px;
+  font-family: var(--mono);
+  line-height: 1.5;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 14px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--primary);
+  margin: 0;
+}

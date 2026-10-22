@@ -25,6 +25,7 @@ AgentDock 不做 runtime、也不自研能力格式，只做生态里最缺的�
 - 可落地：一条命令安装到 DSH、Claude Code、Codex 或任意目录
 - 可追溯：谁发布、谁审核、谁安装、装到哪，全部写审计日志
 - 市场体验：Web 界面分页浏览 + 服务端搜索、markdown 安全渲染、待审核版本的 diff 视图（文件级 + 逐行差异）
+- 策略可视化：管理员可在 Web「策略」页直接编辑自动审批规则（类型/受信发布者/签名要求/扫描阈值/体积上限），保存即生效并留审计
 
 ## 快速开始
 
@@ -429,6 +430,8 @@ agentdock policy set --file policy.json   # admin
 agentdock policy show                     # reviewer
 ```
 
+也可以在 Web 端操作：admin 登录后顶部「策略」标签页提供表单化编辑（启用开关、类型多选、受信发布者列表、是否要求发布者签名、中危阈值、文件数/体积上限），保存即调用 `PUT /api/v1/policy`，重启后从 `data/policy.json` 恢复；reviewer 可在 CLI 用 `policy show` 查看（Web 页仅 admin 可进）。
+
 规则：`kinds` 白名单、`trustedPublishers` 白名单（空数组表示不限制发布者）、`requirePublisherSignature`、高危必须为 0、中危不超过 `maxMedium`、文件数/总体积上限、扫描未命中阻断阈值、且已生成 SBOM。未通过自动审批的版本会记录 `review.auto_skipped` 审计事件（含失败规则）；自动通过的版本记录 `review.auto_approve`，透明日志事件带 `review.auto: true`。
 
 ## SQLite 存储后端（可选）
@@ -554,6 +557,8 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [x] 外部 registry 互操作：GitHub / MCP registry 导入 + 中立市场目录导出（skills.sh 的 `SKILL.md` 可经 GitHub 导入）
 - [x] 依赖清单与 SBOM、按策略自动审批（`data/policy.json` + `review.auto_approve`）
 - [x] SQLite 存储后端（`AGENTDOCK_STORE=sqlite`，node:sqlite + WAL + db.json 自动迁移）
+- [x] 自动审批策略 Web 编辑页（admin 表单化编辑，CLI 等价保留）
+- [x] 审计日志哈希链（`audit verify` 校验断链、轮转归档、CSV/JSONL 导出）
 
 ## License
 

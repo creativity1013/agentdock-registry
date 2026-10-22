@@ -201,12 +201,14 @@ function updateTabs() {
     const view = button.dataset.view;
     let disabled = false;
     if (view === 'review' || view === 'audit') disabled = !can('reviewer');
+    if (view === 'policy') disabled = !can('admin');
     if (view === 'tokens') disabled = !can('admin');
     button.disabled = disabled;
     button.title = disabled ? '需要更高角色权限' : '';
   }
   if (state.view === 'review' && !can('reviewer')) state.view = 'market';
   if (state.view === 'audit' && !can('reviewer')) state.view = 'market';
+  if (state.view === 'policy' && !can('admin')) state.view = 'market';
   if (state.view === 'tokens' && !can('admin')) state.view = 'market';
 }
 
@@ -242,6 +244,7 @@ async function render() {
     if (state.view === 'market') await renderMarket(main);
     else if (state.view === 'review') await renderReview(main);
     else if (state.view === 'audit') await renderAudit(main);
+    else if (state.view === 'policy') await renderPolicy(main);
     else if (state.view === 'tokens') await renderTokens(main);
   } catch (error) {
     renderError(error);
@@ -1067,6 +1070,88 @@ async function renderAudit(main) {
   main.replaceChildren(
     h('div', { class: 'section-title' }, h('h2', {}, '审计日志'), h('span', { class: 'muted' }, `最近 ${data.items.length} / 共 ${data.total} 条`)),
     rows.length ? h('div', { class: 'list' }, ...rows) : h('div', { class: 'empty' }, '暂无审计记录'),
+  );
+}
+
+/* ------------------------------ 策略 ------------------------------ */
+
+async function renderPolicy(main) {
+  const data = await api('/policy');
+  const auto = data.policy?.autoApprove || {};
+
+  const enabled = h('input', { type: 'checkbox', checked: Boolean(auto.enabled) });
+  const kindInputs = ['skill', 'agent', 'plugin'].map((kind) =>
+    h('label', { class: 'check' },
+      h('input', { type: 'checkbox', value: kind, checked: (auto.kinds || []).includes(kind) }),
+      `${KIND_LABEL[kind] || kind}（${kind}）`),
+  );
+  const publishers = h('textarea', {
+    rows: 3,
+    placeholder: '受信发布者，每行一个；留空 = 不限制发布者',
+  }, (auto.trustedPublishers || []).join('\n'));
+  const requireSignature = h('input', { type: 'checkbox', checked: Boolean(auto.requirePublisherSignature) });
+  const maxMedium = h('input', { type: 'number', min: '0', step: '1', value: String(auto.maxMedium ?? 0) });
+  const maxFiles = h('input', { type: 'number', min: '1', max: '200', step: '1', value: String(auto.maxFiles ?? 100) });
+  const maxTotalBytes = h('input', {
+    type: 'number', min: '1', max: String(2 * 1024 * 1024), step: '1024',
+    value: String(auto.maxTotalBytes ?? 2 * 1024 * 1024),
+  });
+
+  const save = h('button', {
+    class: 'btn btn-primary',
+    type: 'button',
+    onClick: async () => {
+      const policy = {
+        autoApprove: {
+          enabled: enabled.checked,
+          kinds: kindInputs
+            .filter((label) => label.querySelector('input').checked)
+            .map((label) => label.querySelector('input').value),
+          trustedPublishers: publishers.value.split('\n').map((line) => line.trim()).filter(Boolean),
+          requirePublisherSignature: requireSignature.checked,
+          maxMedium: Number(maxMedium.value),
+          maxFiles: Number(maxFiles.value),
+          maxTotalBytes: Number(maxTotalBytes.value),
+        },
+      };
+      save.disabled = true;
+      try {
+        await api('/policy', { method: 'PUT', body: { policy } });
+        toast('策略已保存', 'ok');
+        render();
+      } catch (error) {
+        toast(`保存失败：${error.message}`, 'error');
+        save.disabled = false;
+      }
+    },
+  }, '保存策略');
+
+  const row = (label, control, hint) =>
+    h('div', { class: 'form-row' },
+      h('span', { class: 'form-label' }, label),
+      h('div', {}, control, hint ? h('p', { class: 'hint' }, hint) : null));
+
+  main.replaceChildren(
+    h('div', { class: 'section-title' },
+      h('h2', {}, '自动审批策略'),
+      h('span', { class: 'muted' }, `来源：${data.source === 'file' ? 'policy.json（已自定义）' : '默认值（未自定义）'}`)),
+    h('div', { class: 'panel' },
+      h('p', { class: 'hint' },
+        '开启后，发布时若同时满足以下全部规则，版本将自动通过审核并上架（仍会平台签名 + 写入透明日志）；不满足的版本保持 pending，并记录 review.auto_skipped 审计。'),
+      row('自动审批', h('label', { class: 'check' }, enabled, '启用'), '关闭时所有版本都需要人工审核'),
+      row('适用类型', h('span', {}, ...kindInputs), '至少选择一类'),
+      row('受信发布者', publishers, '留空 = 不限制发布者；填写后仅这些用户发布的内容可自动通过'),
+      row('要求发布者签名', h('label', { class: 'check' }, requireSignature, '启用'), '发布时必须携带发布者 ed25519 签名'),
+      row('允许的最大中危数', maxMedium, '0 = 不允许中危；高危始终阻断'),
+      row('最大文件数', maxFiles, '1 ~ 200'),
+      row('最大总字节数', maxTotalBytes, '1 ~ 2097152（2 MB）'),
+      h('div', { class: 'actions' }, save)),
+    h('div', { class: 'panel' },
+      h('h3', {}, '说明'),
+      h('ul', { class: 'hint' },
+        h('li', {}, '策略对之后发布的版本生效，已上架版本不受影响。'),
+        h('li', {}, '开启后低风险内部包免排队；外部导入、非受信发布者仍走人工审核。'),
+        h('li', {}, '策略修改会写入审计日志（action=policy.update）；CLI 等价命令：agentdock policy show / policy set --file policy.json。'))),
   );
 }
 
