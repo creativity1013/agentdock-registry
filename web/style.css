@@ -1063,3 +1063,22 @@ pre.code {
   overflow-x: auto;
   white-space: nowrap;
 }
+
+/* 用户管理：状态徽章与行内操作 */
+.chip-ok {
+  color: var(--green);
+  border-color: rgba(61, 220, 151, 0.35);
+  background: rgba(61, 220, 151, 0.08);
+}
+
+.chip-danger {
+  color: var(--red);
+  border-color: rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.08);
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}

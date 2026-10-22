@@ -1238,54 +1238,108 @@ async function renderPolicy(main) {
 
 async function renderTokens(main) {
   const data = await api('/admin/users');
-  const nameInput = h('input', { placeholder: '用户名' });
-  const roleSelect = h('select', {}, ...['publisher', 'reviewer', 'admin'].map((role) => h('option', { value: role }, ROLE_LABEL[role])));
+  const users = data.items || [];
+  const tenants = [...new Set(users.map((user) => user.tenant || 'default'))].sort();
+
+  const nameInput = h('input', { placeholder: '用户名（唯一）' });
+  const roleSelect = h('select', {}, ...['viewer', 'publisher', 'reviewer', 'admin'].map((role) => h('option', { value: role }, ROLE_LABEL[role] || role)));
+  const tenantInput = h('input', { placeholder: '租户（默认 default，小写字母/数字/_/-）', value: 'default' });
   const created = h('div');
 
-  const rows = data.items.map((user) =>
-    h(
-      'div',
-      { class: 'list-row' },
-      h('span', { class: 'grow mono' }, user.name),
-      h('span', { class: 'chip' }, ROLE_LABEL[user.role] || user.role),
-      h('span', { class: 'muted' }, `创建于 ${fmtTime(user.createdAt)}`),
-    ),
+  const create = h('div', { class: 'actions' },
+    nameInput,
+    roleSelect,
+    tenantInput,
+    h('button', {
+      class: 'btn btn-primary',
+      type: 'button',
+      onClick: async () => {
+        try {
+          const result = await api('/admin/tokens', {
+            method: 'POST',
+            body: { name: nameInput.value.trim(), role: roleSelect.value, tenant: tenantInput.value.trim() || 'default' },
+          });
+          created.replaceChildren(
+            h('p', { class: 'hint' }, `已创建 ${result.user.name}（${ROLE_LABEL[result.user.role] || result.user.role} · 租户 ${result.user.tenant}），令牌只显示一次：`),
+            h('pre', { class: 'code' }, result.token),
+          );
+          toast('令牌已创建', 'ok');
+          render();
+        } catch (error) {
+          toast(`创建失败：${error.message}`, 'error');
+        }
+      },
+    }, '创建用户令牌'),
   );
 
+  const revokeAll = h('button', {
+    class: 'btn btn-danger',
+    type: 'button',
+    onClick: async () => {
+      if (!confirm('强制所有用户重新登录？现有会话 Cookie 会立即失效。')) return;
+      try {
+        const result = await api('/admin/sessions/revoke-all', { method: 'POST', body: {} });
+        toast(`已强制全员下线（globalEpoch=${result.globalEpoch}）`, 'ok');
+        render();
+      } catch (error) {
+        toast(`操作失败：${error.message}`, 'error');
+      }
+    },
+  }, '全员强制下线');
+
+  const rows = users.map((user) => {
+    const disabled = Boolean(user.disabled);
+    const toggle = h('button', {
+      class: 'btn btn-ghost',
+      type: 'button',
+      onClick: async () => {
+        try {
+          await api(`/admin/users/${encodeURIComponent(user.id)}`, {
+            method: 'PATCH',
+            body: { disabled: !disabled },
+          });
+          toast(disabled ? `已启用 ${user.name}` : `已禁用 ${user.name}（会话已失效）`, 'ok');
+          render();
+        } catch (error) {
+          toast(`操作失败：${error.message}`, 'error');
+        }
+      },
+    }, disabled ? '启用' : '禁用');
+    const revoke = h('button', {
+      class: 'btn btn-ghost',
+      type: 'button',
+      onClick: async () => {
+        try {
+          await api(`/admin/users/${encodeURIComponent(user.id)}/revoke-sessions`, { method: 'POST', body: {} });
+          toast(`已强制 ${user.name} 下线`, 'ok');
+        } catch (error) {
+          toast(`操作失败：${error.message}`, 'error');
+        }
+      },
+    }, '强制下线');
+    return h('div', { class: 'list-row' },
+      h('span', { class: 'grow mono' }, user.name),
+      h('span', { class: 'chip' }, ROLE_LABEL[user.role] || user.role),
+      h('span', { class: 'chip' }, `租户 ${user.tenant || 'default'}`),
+      h('span', { class: 'muted' }, user.auth === 'oidc' ? 'SSO' : '令牌'),
+      h('span', { class: disabled ? 'chip chip-danger' : 'chip chip-ok' }, disabled ? '已禁用' : '正常'),
+      h('span', { class: 'muted' }, `创建于 ${fmtTime(user.createdAt)}`),
+      h('span', { class: 'row-actions' }, revoke, toggle),
+    );
+  });
+
   main.replaceChildren(
-    h('div', { class: 'section-title' }, h('h2', {}, '用户与令牌'), h('span', { class: 'muted' }, `共 ${data.items.length} 个用户`)),
-    h(
-      'div',
-      { class: 'panel' },
-      h('h3', {}, '创建令牌'),
-      h(
-        'div',
-        { class: 'actions' },
-        nameInput,
-        roleSelect,
-        h('button', {
-          class: 'btn btn-primary',
-          type: 'button',
-          onClick: async () => {
-            try {
-              const result = await api('/admin/tokens', {
-                method: 'POST',
-                body: { name: nameInput.value.trim(), role: roleSelect.value },
-              });
-              created.replaceChildren(
-                h('p', { class: 'hint' }, `已创建 ${result.user.name}（${ROLE_LABEL[result.user.role]}），令牌只显示一次：`),
-                h('pre', { class: 'code' }, result.token),
-              );
-              toast('令牌已创建', 'ok');
-              render();
-            } catch (error) {
-              toast(`创建失败：${error.message}`, 'error');
-            }
-          },
-        }, '创建'),
-      ),
+    h('div', { class: 'section-title' },
+      h('h2', {}, '用户与令牌'),
+      h('span', { class: 'muted' }, `${users.length} 个用户 · ${tenants.length} 个租户（${tenants.join('、')}）`)),
+    h('div', { class: 'panel' },
+      h('h3', {}, '创建用户令牌'),
+      create,
       created,
-    ),
+      h('p', { class: 'hint' }, '禁用用户会立即失效其所有会话；「强制下线」只影响该用户的 SSO 会话，不影响长期令牌。')),
+    h('div', { class: 'panel' },
+      h('div', { class: 'actions' }, revokeAll),
+      h('p', { class: 'hint' }, '全员强制下线的会让所有已登录成员需要重新 SSO 登录。')),
     rows.length ? h('div', { class: 'list' }, ...rows) : h('div', { class: 'empty' }, '暂无用户'),
   );
 }
