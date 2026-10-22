@@ -399,6 +399,11 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | `AGENTDOCK_OIDC_DEFAULT_ROLE` | `viewer` | 新账号默认角色：`viewer/publisher/reviewer/admin` |
 | `AGENTDOCK_OIDC_TENANT_CLAIM` | `tenant` | 用户信息中表示租户的 claim 名 |
 | `AGENTDOCK_OIDC_ROLE_CLAIM` | `role` | 用户信息中表示角色的 claim 名（须为合法角色） |
+| `AGENTDOCK_RATE_LIMIT` | 启用 | 设为 `0` 关闭单机限流 |
+| `AGENTDOCK_RATE_LIMIT_WINDOW_MS` | `60000` | 限流窗口（毫秒） |
+| `AGENTDOCK_RATE_LIMIT_MAX` | `300` | 每窗口每 IP 的 API 请求上限 |
+| `AGENTDOCK_RATE_LIMIT_LOGIN_MAX` | `20` | 每窗口每 IP 的 OIDC 登录端点上限 |
+| `AGENTDOCK_TRUST_PROXY` | — | 设为 `1` 时信任 `X-Forwarded-For`（必须置于可信反代之后） |
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
@@ -581,6 +586,8 @@ agentdock/
 │   ├── auth.mjs             # 令牌/角色/发布者密钥/OIDC 账号
 │   ├── session.mjs          # 会话 Cookie（HMAC 签名，8h）
 │   ├── oidc.mjs             # OIDC discovery + PKCE 授权码流程
+│   ├── security.mjs         # CSRF 双提交校验（Cookie 会话）
+│   ├── ratelimit.mjs        # 内存滑动窗口限流 / 来源 IP 解析
 │   ├── audit.mjs            # JSONL 审计（哈希链 + 多维过滤 + 校验 + 导出 + 轮转）
 │   ├── config.mjs           # 配置与数据目录
 │   ├── errors.mjs / util.mjs / yaml.mjs
@@ -590,7 +597,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（110 个用例）
+├── tests/                   # node:test 测试（113 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -617,6 +624,8 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 令牌只存 `sha256` 哈希；初始明文令牌仅出现在 `data/BOOTSTRAP-TOKENS.txt`（600 权限），建议首次登录后轮换并删除该文件。
 - 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip。每条记录带 `seq`/`prevHash`/`hash` 哈希链（`hash = sha256([seq, prevHash, ts, actor, role, action, target, meta, ip])`），篡改/删除/插入可被 `agentdock audit verify`（或 `GET /audit/verify`）定位；超过 `AGENTDOCK_AUDIT_MAX_BYTES`（默认 8MB）轮转到 `data/audit/archive/`，保留 `AGENTDOCK_AUDIT_KEEP`（默认 24）份归档，链跨文件连续。
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
+- **限流**：`/api/*` 与 OIDC 登录端点按 IP 滑动窗口限流（默认 300/分钟、登录 20/分钟），超限返回 429 + `Retry-After`；`AGENTDOCK_RATE_LIMIT=0` 可关闭。进程内计数，多实例部署需在网关层再做全局限流。
+- **CSRF**：SSO Cookie 会话的写操作（POST/PUT/PATCH/DELETE）必须携带双提交令牌 `x-agentdock-csrf`（值等于非 HttpOnly 的 `agentdock_csrf` Cookie），并校验 `Origin` 与 `Host` 一致；Bearer 令牌客户端不受影响。
 - 扫描是**启发式规则**，不是沙箱：绕过规则注入的能力包仍可能危险，审核环节不可省。
 - **内容签名**：版本审核通过时，平台用 ed25519 私钥对规范化载荷 `agentdock-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名；私钥存于 `data/signing-key.json`（600 权限，务必备份），公钥通过 `GET /api/v1/keys` 公开，任何人可离线验签。`verify-signature` / `?verify=1` 会同时重算磁盘内容哈希，能发现发布后对存储内容的替换或篡改。
 - 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源。

@@ -2,6 +2,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
+import { createRateLimiter, requestIp } from './ratelimit.mjs';
+import { checkCsrf, cookieValue, CSRF_COOKIE } from './security.mjs';
 import { createUserDirectory, tokenFromRequest, ROLES, ROLE_LABEL } from './auth.mjs';
 import { createAuditLog } from './audit.mjs';
 import { createStore, VERSION_STATUS_LABEL } from './store.mjs';
@@ -51,6 +53,24 @@ export function createApp(config = loadConfig()) {
   const store = createStore(config, { audit, users, transparency });
   const policyState = loadPolicy(config);
   store.setPolicy(policyState.policy);
+  const rateLimit = config.security?.rateLimit || { enabled: false };
+  const apiLimiter = createRateLimiter({ windowMs: rateLimit.windowMs || 60_000, max: rateLimit.max || 300 });
+  const loginLimiter = createRateLimiter({ windowMs: rateLimit.windowMs || 60_000, max: rateLimit.loginMax || 20 });
+  const pruneTimer = setInterval(() => {
+    apiLimiter.prune();
+    loginLimiter.prune();
+  }, 60_000);
+  pruneTimer.unref?.();
+
+  function enforceRate(limiter, key) {
+    if (!rateLimit.enabled) return;
+    const result = limiter.hit(key);
+    if (!result.allowed) {
+      throw new AppError(429, 'RATE_LIMITED', '请求过于频繁，请稍后重试', {
+        retryAfterSeconds: Math.max(1, Math.ceil(result.retryAfterMs / 1000)),
+      });
+    }
+  }
   const sessions = createSessionManager(config);
   const oidc = createOidcClient(config);
   const oidcStates = new Map(); // state -> { verifier, redirectUri, expiresAt }
@@ -63,13 +83,23 @@ export function createApp(config = loadConfig()) {
     } catch {
       throw badRequest('URL 编码非法');
     }
+    const requestAddress = requestIp(req, rateLimit.trustProxy);
+    if (pathname.startsWith('/api/') || pathname.startsWith('/auth/oidc')) {
+      enforceRate(apiLimiter, `global:${requestAddress}`);
+    }
+    if (pathname === '/auth/oidc/login' || pathname === '/auth/oidc/callback') {
+      enforceRate(loginLimiter, `login:${requestAddress}`);
+    }
+    let authVia = null;
     let auth = users.authenticate(tokenFromRequest(req));
+    if (auth) authVia = 'bearer';
     if (!auth) {
       const cookieValue = sessions.cookieFrom(req);
       const payload = cookieValue ? sessions.verify(cookieValue) : null;
       if (payload) {
         const user = users.getUser(payload.uid);
         if (user) {
+          authVia = 'session';
           auth = {
             id: user.id,
             name: user.name,
@@ -82,8 +112,9 @@ export function createApp(config = loadConfig()) {
     }
     const ctx = {
       auth,
+      authVia,
       tenant: auth?.tenant || 'default',
-      ip: req.socket?.remoteAddress || '',
+      ip: requestAddress,
       method: req.method || 'GET',
     };
 
@@ -147,6 +178,10 @@ export function createApp(config = loadConfig()) {
     }
 
     if (pathname === '/auth/logout' && (req.method || 'GET') === 'POST') {
+      const hasSession = Boolean(cookieValue(req.headers.cookie, 'agentdock_session'));
+      const csrf = checkCsrf({ method: 'POST', authVia: hasSession ? 'session' : null, headers: req.headers });
+      if (!csrf.ok) throw forbidden(`CSRF 校验失败：${csrf.reason}`);
+      audit.append({ actor: auth?.name || 'anonymous', role: auth?.role || '', action: 'user.logout', target: auth?.name || '', meta: {}, ip: ctx.ip });
       res.writeHead(204, { 'Set-Cookie': sessions.clearCookie(), 'Cache-Control': 'no-store' });
       return res.end();
     }
@@ -164,6 +199,8 @@ export function createApp(config = loadConfig()) {
 
   async function handleApi(req, res, ctx, pathname, url) {
     const { auth, ip, method } = ctx;
+    const csrf = checkCsrf({ method, authVia: ctx.authVia, headers: req.headers });
+    if (!csrf.ok) throw forbidden(`CSRF 校验失败：${csrf.reason}`);
     const tenant = ctx.tenant || 'default';
     const route = pathname.replace(/^\/api\/v1\/?/, '');
     const requireAuth = () => {
@@ -710,6 +747,9 @@ export function createApp(config = loadConfig()) {
         return;
       }
       if (error instanceof AppError) {
+        if (error.status === 429 && error.details?.retryAfterSeconds) {
+          res.setHeader('Retry-After', String(error.details.retryAfterSeconds));
+        }
         return sendJson(res, error.status, {
           ok: false,
           error: { code: error.code, message: error.message, details: error.details ?? null },
@@ -722,6 +762,7 @@ export function createApp(config = loadConfig()) {
 
   // 服务关闭时释放元数据后端（SQLite 需要 close 才能安全删除临时数据目录）
   server.on('close', () => {
+    clearInterval(pruneTimer);
     try {
       store.close?.();
     } catch {

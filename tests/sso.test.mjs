@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { startTestServer } from './helpers.mjs';
+import { startTestServer, skillPayload } from './helpers.mjs';
 
 /** 最小 OIDC provider：discovery + token + userinfo */
 async function startMockOidc() {
@@ -98,6 +98,26 @@ test('SSO：OIDC 授权码 + PKCE 登录，自动建号并写入会话 Cookie', 
   // 用会话 Cookie 访问租户内市场
   const list = await fetch(`${server.url}/api/v1/packages`, { headers: { cookie } });
   assert.equal(list.status, 200);
+
+  // CSRF：Cookie 会话的写操作必须携带双提交令牌
+  const csrf = /agentdock_csrf=([^;]+)/.exec(callback.headers.get('set-cookie') || '')?.[1];
+  assert.ok(csrf, '登录响应应同时下发 CSRF Cookie');
+  const noCsrf = await fetch(`${server.url}/api/v1/verify`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify(skillPayload()),
+  });
+  assert.equal(noCsrf.status, 403);
+  const withCsrf = await fetch(`${server.url}/api/v1/verify`, {
+    method: 'POST',
+    headers: {
+      cookie: `${cookie}; agentdock_csrf=${csrf}`,
+      'content-type': 'application/json',
+      'x-agentdock-csrf': decodeURIComponent(csrf),
+    },
+    body: JSON.stringify(skillPayload()),
+  });
+  assert.equal(withCsrf.status, 200);
 
   // 无效 state 回调被拒绝
   const bad = await fetch(`${server.url}/auth/oidc/callback?state=nope&code=abc`, { redirect: 'manual' });

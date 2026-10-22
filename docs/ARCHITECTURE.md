@@ -269,6 +269,8 @@ data/
 | `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 + OIDC 账号开通 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf/getUser/provisionOidcUser`）、`tokenFromRequest` |
 | `src/session.mjs` | 会话 Cookie：HMAC-SHA256 签名、8h 过期、安全属性集中定义 | `createSessionManager`（`sign/verify/cookieFrom/cookieHeader/clearCookie`）、`SESSION_COOKIE` |
 | `src/oidc.mjs` | OIDC discovery + PKCE 授权码流程（零依赖，身份以 userinfo 为准） | `createOidcClient`（`discover/createPkcePair/createState/authorizeUrl/exchangeCode/userinfo/mapClaims/loginUrl`） |
+| `src/security.mjs` | Cookie 会话 CSRF 防护（双提交 Cookie + Origin 校验） | `checkCsrf`、`cookieValue`、`CSRF_COOKIE` |
+| `src/ratelimit.mjs` | 单机内存滑动窗口限流与来源 IP 解析 | `createRateLimiter`、`requestIp` |
 | `src/audit.mjs` | 审计日志（哈希链 + 过滤 + 校验 + 导出 + 轮转） | `createAuditLog`（`append/read/verify/exportLines`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
@@ -290,6 +292,7 @@ data/
 10. **外部 registry 导入**（`registry.mjs`）：只从服务端配置的 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY` 读取，请求体不接受任意 URL（防 SSRF）；单次 200 文件 / 单文件 512KB / 总量 2MB、15s 超时；外部内容一律走同一 normalize → validate → scan 流水线，导入后为 `pending`，必须审核才能上架；导入操作需 publisher 权限并记录审计 `sync.import`。
 11. **SBOM 与自动审批**：每个版本生成 `agentdock-sbom@1`（文件哈希 + 声明的工具/MCP/技能组件 + 可复现 digest），供审核与供应链比对；自动审批默认关闭，开启后仅对策略白名单内、无高危、体积达标且（可选）带发布者签名的版本生效，自动通过的版本同样有平台签名、透明日志与审计，未通过记录失败规则，保证「放宽人工审核」不牺牲可追溯性。
 12. **SSO 与多租户**：OIDC Authorization Code + PKCE，无本地 JWT 验签（信任 userinfo 端点，需 HTTPS 可达）；登录后发 HMAC 签名 Cookie（8h），不落服务端会话表。租户由令牌/`tenant` claim 绑定，发布时写入版本 `tenant`；市场列表/统计/详情/审核队列/diff/SBOM/透明证明查询按租户过滤，跨租户一律 404，同名包允许跨租户并存（`kind/name` + `tenant` 区分）。审计与透明日志保持全局视图，会话失效依赖过期/重启。
+13. **限流与 CSRF**：`/api/*` 与 OIDC 登录端点按 IP 做内存滑动窗口限流（默认 300/分钟、登录 20/分钟，可配置/关闭），超限返回 429 + `Retry-After`；SSO Cookie 会话的写操作强制双提交 CSRF 令牌（`x-agentdock-csrf` = `agentdock_csrf` Cookie）并校验 `Origin`/`Host`，Bearer 客户端不受影响。进程内计数，多实例需网关层限流。
 
 ## 6. 安装目标模型
 
@@ -378,6 +381,7 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 - **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency / registry / sbom / policy——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖；另覆盖策略更新权限、自动审批上架、SBOM 接口与版本详情 SBOM 摘要。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
 - **存储后端测试**（`tests/sqlite.test.mjs`）：Node 24 上验证 SQLite 后端的发布/审核/安装持久化、重启恢复、db.json → sqlite 自动迁移与后端选择；Node 20/22 自动 skip。
+- **安全测试**（`tests/security.test.mjs`）：限流滑动窗口与恢复、CSRF 校验矩阵、接口 429 + `Retry-After`。
 - **认证与多租户测试**（`tests/sso.test.mjs` / `tests/tenant.test.mjs`）：本地 mock OIDC（discovery/token/userinfo）验证 PKCE 登录、Cookie 会话与自动建号；多租户验证列表/详情/审核队列/统计隔离、跨租户 404 与同名冲突、非法租户名拒绝。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果；`smoke:sqlite` 用 SQLite 后端跑同一套。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。

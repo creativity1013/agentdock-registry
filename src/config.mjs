@@ -66,6 +66,33 @@ export function loadConfig(env = process.env, overrides = {}) {
     throw new Error(`AGENTDOCK_OIDC_DEFAULT_ROLE 不合法：${oidcDefaultRole}`);
   }
 
+  const rateLimitEnabled = (overrides.security?.rateLimit?.enabled ?? env.AGENTDOCK_RATE_LIMIT !== '0') === true;
+  const rateWindowMs = Number(
+    overrides.security?.rateLimit?.windowMs ?? env.AGENTDOCK_RATE_LIMIT_WINDOW_MS ?? 60_000,
+  );
+  const rateMax = Number(overrides.security?.rateLimit?.max ?? env.AGENTDOCK_RATE_LIMIT_MAX ?? 300);
+  const rateLoginMax = Number(
+    overrides.security?.rateLimit?.loginMax ?? env.AGENTDOCK_RATE_LIMIT_LOGIN_MAX ?? 20,
+  );
+  if (!Number.isFinite(rateWindowMs) || rateWindowMs <= 0) {
+    throw new Error(`AGENTDOCK_RATE_LIMIT_WINDOW_MS 不合法：${env.AGENTDOCK_RATE_LIMIT_WINDOW_MS}`);
+  }
+  if (!Number.isFinite(rateMax) || rateMax <= 0) {
+    throw new Error(`AGENTDOCK_RATE_LIMIT_MAX 不合法：${env.AGENTDOCK_RATE_LIMIT_MAX}`);
+  }
+  if (!Number.isFinite(rateLoginMax) || rateLoginMax <= 0) {
+    throw new Error(`AGENTDOCK_RATE_LIMIT_LOGIN_MAX 不合法：${env.AGENTDOCK_RATE_LIMIT_LOGIN_MAX}`);
+  }
+  const security = {
+    rateLimit: {
+      enabled: rateLimitEnabled,
+      windowMs: rateWindowMs,
+      max: rateMax,
+      loginMax: rateLoginMax,
+      trustProxy: Boolean(overrides.security?.rateLimit?.trustProxy ?? env.AGENTDOCK_TRUST_PROXY === '1'),
+    },
+  };
+
   const config = {
     host,
     port,
@@ -77,6 +104,7 @@ export function loadConfig(env = process.env, overrides = {}) {
     dev: overrides.dev ?? env.AGENTDOCK_DEV === '1',
     version: readOwnVersion(),
     registries,
+    security,
     githubToken: overrides.githubToken ?? env.GITHUB_TOKEN ?? '',
     store: {
       backend,

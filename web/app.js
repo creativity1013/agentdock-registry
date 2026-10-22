@@ -94,6 +94,8 @@ function scanChips(scan) {
 async function api(path, { method = 'GET', body } = {}) {
   const headers = {};
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const csrf = cookieValue(CSRF_COOKIE);
+  if (csrf) headers['x-agentdock-csrf'] = csrf;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const response = await fetch(API + path, {
     method,
@@ -125,6 +127,22 @@ function toast(message, type = '') {
   node.className = `toast ${type}`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.add('hidden'), 3600);
+}
+
+const CSRF_COOKIE = 'agentdock_csrf';
+
+function cookieValue(name) {
+  for (const part of (document.cookie || '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) {
+      try {
+        return decodeURIComponent(rest.join('='));
+      } catch {
+        return rest.join('=');
+      }
+    }
+  }
+  return '';
 }
 
 function renderError(error) {
@@ -197,7 +215,10 @@ async function login() {
 async function logout() {
   if (!state.token) {
     try {
-      await fetch('/auth/logout', { method: 'POST' });
+      await fetch('/auth/logout', {
+        method: 'POST',
+        headers: { 'x-agentdock-csrf': cookieValue(CSRF_COOKIE) },
+      });
     } catch {
       /* 忽略 */
     }

@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensureDir, readJson } from './util.mjs';
+import { ensureDir, randomToken, readJson } from './util.mjs';
+import { CSRF_COOKIE } from './security.mjs';
 
 /**
  * 轻量会话：HMAC-SHA256 签名的 Cookie（无状态，服务端只存签名密钥）。
@@ -61,20 +62,33 @@ export function createSessionManager(config) {
     return '';
   }
 
+  /** 登录成功时同时下发会话 Cookie 与 CSRF 双提交 Cookie（非 HttpOnly，供前端读取） */
   function cookieHeader(userId, { ttlSeconds = SESSION_TTL_SECONDS, secure = false } = {}) {
-    const attributes = [
+    const session = [
       `${SESSION_COOKIE}=${encodeURIComponent(sign(userId, { ttlSeconds }))}`,
       'Path=/',
       'HttpOnly',
       'SameSite=Lax',
       `Max-Age=${ttlSeconds}`,
     ];
-    if (secure) attributes.push('Secure');
-    return attributes.join('; ');
+    const csrf = [
+      `${CSRF_COOKIE}=${encodeURIComponent(randomToken(18))}`,
+      'Path=/',
+      'SameSite=Lax',
+      `Max-Age=${ttlSeconds}`,
+    ];
+    if (secure) {
+      session.push('Secure');
+      csrf.push('Secure');
+    }
+    return [session.join('; '), csrf.join('; ')];
   }
 
   function clearCookie() {
-    return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+    return [
+      `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+      `${CSRF_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0`,
+    ];
   }
 
   return { file, sign, verify, cookieFrom, cookieHeader, clearCookie, ttlSeconds: SESSION_TTL_SECONDS };
