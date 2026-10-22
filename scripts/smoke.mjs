@@ -197,6 +197,25 @@ async function main() {
   assert(upgradedManifest.package.version === '0.2.0', '升级后安装清单版本未更新');
   console.log('✓ 版本检查与升级：outdated 发现新版本，upgrade 更新本地安装');
 
+  // 回滚 + 卸载：读取安装清单里的版本历史，回滚到 0.1.0 后再卸载
+  const rollbackOut = await runCli(
+    ['rollback', 'skill/code-reviewer', '--target', 'dir', '--dir', installDir],
+    tokens.publisher,
+  );
+  assert(rollbackOut.includes('已回滚') && rollbackOut.includes('0.1.0'), `rollback 输出异常：\n${rollbackOut}`);
+  const rolledManifest = JSON.parse(
+    fs.readFileSync(path.join(installDir, 'skills', 'code-reviewer', '.agentdock-install.json'), 'utf8'),
+  );
+  assert(rolledManifest.package.version === '0.1.0', '回滚后安装清单版本未更新');
+  assert(rolledManifest.history.some((item) => item.version === '0.2.0'), '回滚后应保留版本历史');
+  const uninstallOut = await runCli(
+    ['uninstall', 'skill/code-reviewer', '--target', 'dir', '--dir', installDir],
+    tokens.publisher,
+  );
+  assert(uninstallOut.includes('已卸载'), `uninstall 输出异常：\n${uninstallOut}`);
+  assert(!fs.existsSync(path.join(installDir, 'skills', 'code-reviewer', 'SKILL.md')), '卸载后文件仍存在');
+  console.log('✓ 回滚与卸载：按清单历史回滚版本，卸载清理文件');
+
   // 外部 registry：适配器信息 + 中立市场目录导出
   const syncSources = await runCli(['sync', 'sources'], tokens.publisher);
   assert(syncSources.includes('GitHub 仓库') && syncSources.includes('MCP registry'), 'sync sources 输出异常');

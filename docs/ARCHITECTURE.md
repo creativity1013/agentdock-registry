@@ -78,6 +78,7 @@ audit.append('review.approve' | 'review.auto_approve' | 'review.reject')
 ```
 CLI: install <kind/name[@version]> --target <dsh|claude|codex|shared|dir>
   ▼ 服务端解析版本（默认 latest 已发布）→ 返回文件清单 + 内容 + 安装清单
+  ▼ 本地默认复检：安全扫描 + 签名/内容哈希验证（失败中止，--no-verify 跳过）
 targets.planInstall()               目标路径 + 冲突检测 + 备份计划
 targets.applyInstall()              原子写入（.tmp → rename）+ .agentdock-install.json
   ▼

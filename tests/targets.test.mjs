@@ -11,6 +11,9 @@ import {
   installDestination,
   listTargets,
   listInstalls,
+  readInstallManifest,
+  uninstallPlan,
+  applyUninstall,
   TARGET_IDS,
 } from '../src/targets.mjs';
 import { AppError } from '../src/errors.mjs';
@@ -205,4 +208,52 @@ test('listInstalls 扫描安装清单', (t) => {
   assert.equal(dirInstalls.length, 1);
   assert.equal(dirInstalls[0].target, 'dir');
   assert.equal(dirInstalls[0].name, 'demo-skill');
+});
+
+test('安装清单记录 contentHash/目标/版本历史，升级后可回溯', (t) => {
+  const home = withHome(t);
+  const bundle = skillBundle();
+  const plan1 = planInstall(bundle, {
+    target: 'dsh',
+    home,
+    history: [{ version: '0.0.1', installedAt: '2026-01-01T00:00:00.000Z' }],
+  });
+  applyInstall(plan1);
+  const manifest = JSON.parse(fs.readFileSync(plan1.manifestPath, 'utf8'));
+  assert.equal(manifest.target, 'dsh');
+  assert.equal(manifest.history.length, 1);
+  assert.equal(manifest.history[0].version, '0.0.1');
+});
+
+test('uninstallPlan/applyUninstall：dir 布局按清单删除包目录与清单', (t) => {
+  const home = withHome(t);
+  const bundle = skillBundle();
+  const plan = planInstall(bundle, { target: 'dsh', home });
+  applyInstall(plan);
+  assert.ok(fs.existsSync(path.join(home, '.dsh', 'skills', 'demo-skill', 'SKILL.md')));
+  const removal = uninstallPlan({ kind: 'skill', name: 'demo-skill', target: 'dsh', home });
+  assert.equal(removal.layout, 'dir');
+  const result = applyUninstall(removal);
+  assert.ok(result.removedFiles >= 1);
+  assert.ok(!fs.existsSync(path.join(home, '.dsh', 'skills', 'demo-skill')));
+  assert.throws(() => uninstallPlan({ kind: 'skill', name: 'demo-skill', target: 'dsh', home }), /未找到安装记录/);
+});
+
+test('readInstallManifest：file 布局（Claude agent）与未安装返回 null', (t) => {
+  const home = withHome(t);
+  const agent = {
+    kind: 'agent',
+    name: 'reviewer',
+    version: '0.1.0',
+    files: [{ path: 'agent.md', content: '---\nname: reviewer\ndescription: x\n---\n', encoding: 'utf8' }],
+  };
+  applyInstall(planInstall(agent, { target: 'claude', home }));
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'agents', 'reviewer.md')));
+  const found = readInstallManifest({ kind: 'agent', name: 'reviewer', target: 'claude', home });
+  assert.equal(found.manifest.package.version, '0.1.0');
+  assert.equal(readInstallManifest({ kind: 'agent', name: 'reviewer', target: 'dsh', home }).manifest, null);
+  const removal = uninstallPlan({ kind: 'agent', name: 'reviewer', target: 'claude', home });
+  applyUninstall(removal);
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'agents', 'reviewer.md')));
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'agents', 'reviewer.agentdock.json')));
 });

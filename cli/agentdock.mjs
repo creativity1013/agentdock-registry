@@ -8,7 +8,17 @@ import { fileURLToPath } from 'node:url';
 import { readBundleFromDirectory, KINDS, KIND_LABEL } from '../src/bundle.mjs';
 import { analyzeInput } from '../src/pipeline.mjs';
 import { parseFrontmatter } from '../src/yaml.mjs';
-import { planInstall, applyInstall, summarizePlan, listInstalls, TARGET_LABEL, TARGET_IDS } from '../src/targets.mjs';
+import {
+  planInstall,
+  applyInstall,
+  summarizePlan,
+  listInstalls,
+  readInstallManifest,
+  uninstallPlan,
+  applyUninstall,
+  TARGET_LABEL,
+  TARGET_IDS,
+} from '../src/targets.mjs';
 import {
   renderPresetPatch,
   upsertProfilePatch,
@@ -39,13 +49,13 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
 
   agentdock list [--kind skill|agent|plugin] [--q 关键词] [--status published]
   agentdock install <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--force] [--profile <profile>]
-                    [--scan] [--verify] [--allow-risk]  安装前本地复检：安全扫描 / 验签
+                    [--no-verify] [--allow-risk]  安装前默认扫描 + 验签（--no-verify 跳过）
                                                    target=dsh-agent 生成 DSH preset 片段；--profile 会并入该 profile 的 cordis.patch.yml
 
   agentdock outdated [--target <target>] [--dir <路径>] [--json]
                                                    检查本地已安装包是否有新版本（读取安装清单）
   agentdock upgrade <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--profile <profile>]
-                    [--scan] [--verify] [--allow-risk]  升级前同样可本地复检
+                    [--no-verify] [--allow-risk]  升级前默认扫描 + 验签（--no-verify 跳过）
                                                    升级本地安装到最新（或指定）版本，默认覆盖同名文件
 
   agentdock verify-signature <kind>/<name>[@version]
@@ -473,9 +483,15 @@ async function cmdQuality(positionals, flags) {
   console.log(`  无高危：${mark(checks.scanNoHigh)}   无高危/中危：${mark(checks.scanClean)}`);
 }
 
-/** 安装/升级前的本地复检：安全扫描（--scan）与签名校验（--verify） */
+/**
+ * 安装/升级前的本地复检：默认开启安全扫描与签名校验。
+ * --no-verify 跳过两者；--allow-risk 在命中高危/签名无效时仍继续。
+ */
 async function preflightInstall(conn, bundle, flags) {
-  if (flags.scan) {
+  const skipAll = Boolean(flags['no-verify']);
+  const wantScan = !skipAll && flags.scan !== false;
+  const wantVerify = !skipAll && flags.verify !== false;
+  if (wantScan) {
     const report = analyzeInput(bundle);
     const summary = report.scan.summary;
     console.log(`  安装前扫描：高危 ${summary.high} / 中危 ${summary.medium} / 低危 ${summary.low}`);
@@ -487,7 +503,7 @@ async function preflightInstall(conn, bundle, flags) {
       throw new Error('安装前扫描命中高危规则，已中止（如确认可信，加 --allow-risk 跳过）');
     }
   }
-  if (flags.verify) {
+  if (wantVerify) {
     const result = await api(
       conn,
       'GET',
@@ -496,7 +512,11 @@ async function preflightInstall(conn, bundle, flags) {
     if (result.valid) {
       console.log(`  签名校验：✓ ${result.algorithm} ${String(result.keyId || '').slice(0, 16)}…`);
     } else {
-      console.log(`  ! 签名校验失败：${(result.reasons || []).join('；') || '未知原因'}`);
+      const reasonsText = (result.reasons || []).join('；') || '未知原因';
+      if (!flags['allow-risk']) {
+        throw new Error(`安装前签名校验失败：${reasonsText}（如确认可信，加 --allow-risk 跳过）`);
+      }
+      console.log(`  ! 签名校验失败（已按 --allow-risk 继续）：${reasonsText}`);
     }
   }
 }
@@ -564,7 +584,18 @@ async function cmdUpgrade(positionals, flags) {
     `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/bundle`,
   );
   await preflightInstall(conn, bundleData.bundle, flags);
-  const plan = planInstall(bundleData.bundle, { target, home, dir: flags.dir, force: true });
+  const previous = readInstallManifest({ kind: spec.kind, name: spec.name, target, home, dir: flags.dir }).manifest;
+  const history = previous
+    ? [
+        ...(Array.isArray(previous.history) ? previous.history : []),
+        {
+          version: previous.package.version,
+          contentHash: previous.contentHash || null,
+          installedAt: previous.installedAt || null,
+        },
+      ].slice(-5)
+    : [];
+  const plan = planInstall(bundleData.bundle, { target, home, dir: flags.dir, force: true, history });
   applyInstall(plan);
   const summary = summarizePlan(plan, { home });
   console.log(
@@ -593,6 +624,78 @@ async function cmdUpgrade(positionals, flags) {
   }
 }
 
+function findInstalls(spec, flags) {
+  const targets = flags.target
+    ? [String(flags.target)]
+    : TARGET_IDS.filter((item) => item !== 'dir' || flags.dir);
+  return listInstalls({ home: resolveHome(), dir: flags.dir, targets }).filter(
+    (item) => item.kind === spec.kind && item.name === spec.name,
+  );
+}
+
+/** 卸载本地已安装的能力包（读取安装清单后删除文件/目录） */
+async function cmdUninstall(positionals, flags) {
+  const spec = parseSpec(positionals[0]);
+  const matches = findInstalls(spec, flags);
+  if (matches.length === 0) throw new Error(`未找到已安装的 ${spec.kind}/${spec.name}（可用 list --installed 查看）`);
+  for (const entry of matches) {
+    const plan = uninstallPlan({
+      kind: spec.kind,
+      name: spec.name,
+      target: entry.target,
+      home: resolveHome(),
+      dir: flags.dir,
+    });
+    const result = applyUninstall(plan);
+    console.log(`✓ 已卸载 ${spec.kind}/${spec.name}@${entry.version}（${TARGET_LABEL[entry.target]}）`);
+    for (const removed of result.removed) console.log(`  - ${removed}`);
+  }
+}
+
+/** 回滚到安装清单里记录的上一版本 */
+async function cmdRollback(positionals, flags) {
+  const spec = parseSpec(positionals[0]);
+  const conn = resolveConnection(flags);
+  requireToken(conn);
+  const home = resolveHome();
+  const matches = findInstalls(spec, flags);
+  if (matches.length === 0) throw new Error(`未找到已安装的 ${spec.kind}/${spec.name}`);
+  const entry = matches[0];
+  const { manifest } = readInstallManifest({
+    kind: spec.kind,
+    name: spec.name,
+    target: entry.target,
+    home,
+    dir: flags.dir,
+  });
+  const history = Array.isArray(manifest?.history) ? manifest.history : [];
+  const targetVersion = history[history.length - 1];
+  if (!targetVersion?.version) {
+    throw new Error(`${spec.kind}/${spec.name} 没有可回滚的历史版本（安装/升级一次后才有记录）`);
+  }
+  const bundleData = await api(
+    conn,
+    'GET',
+    `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(targetVersion.version)}/bundle`,
+  );
+  await preflightInstall(conn, bundleData.bundle, flags);
+  // 回滚后把当前版本记入历史，便于再次回滚/前进
+  const remaining = history.slice(0, -1);
+  if (!remaining.some((item) => item.version === entry.version)) {
+    remaining.push({ version: entry.version, installedAt: entry.installedAt ?? null });
+  }
+  const plan = planInstall(bundleData.bundle, {
+    target: entry.target,
+    home,
+    dir: flags.dir,
+    force: true,
+    history: remaining,
+  });
+  applyInstall(plan);
+  console.log(`✓ 已回滚 ${spec.kind}/${spec.name}：${entry.version} → ${targetVersion.version}（${TARGET_LABEL[entry.target]}）`);
+  console.log(`  目标目录：${plan.dest.absolutePath}`);
+}
+
 async function cmdInstall(positionals, flags) {
   const spec = parseSpec(positionals[0]);
   const conn = resolveConnection(flags);
@@ -611,16 +714,30 @@ async function cmdInstall(positionals, flags) {
   await preflightInstall(conn, bundleData.bundle, flags);
   const target = flags.target || 'dsh';
   if (!TARGET_LABEL[target]) throw new Error(`未知安装目标：${target}（可选：${TARGET_IDS.join(' / ')}）`);
+  const home = resolveHome();
+  const previous = readInstallManifest({ kind: spec.kind, name: spec.name, target, home, dir: flags.dir }).manifest;
+  const history = previous
+    ? [
+        ...(Array.isArray(previous.history) ? previous.history : []),
+        {
+          version: previous.package.version,
+          contentHash: previous.contentHash || null,
+          installedAt: previous.installedAt || null,
+        },
+      ].slice(-5)
+    : [];
   const plan = planInstall(bundleData.bundle, {
     target,
-    home: resolveHome(),
+    home,
     dir: flags.dir,
     force: Boolean(flags.force),
+    history,
   });
   const result = applyInstall(plan);
   const summary = summarizePlan(plan, { home: resolveHome() });
   console.log(`✓ 已安装 ${spec.kind}/${spec.name}@${version} → ${TARGET_LABEL[target]}`);
   console.log(`  目标目录：${summary.absolutePath}`);
+  if (history.length) console.log(`  历史版本（可回滚）：${history.map((item) => item.version).join(' → ')}`);
   for (const file of summary.files) console.log(`  - ${file.targetPath}`);
   for (const note of summary.notes) console.log(`  ! ${note}`);
   if (summary.preset) {
@@ -1305,6 +1422,12 @@ async function main() {
       return cmdVerify(positionals, flags);
     case 'list':
       return cmdList(flags);
+    case 'uninstall':
+      await cmdUninstall(positionals, flags);
+      break;
+    case 'rollback':
+      await cmdRollback(positionals, flags);
+      break;
     case 'install':
       return cmdInstall(positionals, flags);
     case 'outdated':

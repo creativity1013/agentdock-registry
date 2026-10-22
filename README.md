@@ -122,9 +122,11 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `list` | 列出已发布能力包（`--kind --json`） |
 | `review queue` | 列出待审核版本 |
 | `review approve\|reject <kind/name@version>` | 审核操作（`--note`） |
-| `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段；`--scan`/`--verify` 安装前本地复检 |
+| `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段；**默认安装前扫描 + 验签**（`--no-verify` 跳过，`--allow-risk` 允许高危继续） |
 | `outdated` | 扫描本地安装清单，对比服务端最新已发布版本（`--target --dir --json`）；有更新时 exit 0 |
-| `upgrade <kind/name[@version]>` | 升级本地安装到最新/指定版本（`--target --dir --force --profile`），默认覆盖同名文件并上报安装计数 |
+| `upgrade <kind/name[@version]>` | 升级本地安装到最新/指定版本（`--target --dir --force --profile`），默认覆盖同名文件并上报安装计数；安装清单保留最近 5 个版本历史 |
+| `rollback <kind/name>` | 按安装清单历史回滚到上一个安装过的版本（`--target --dir`），同样做扫描/验签 |
+| `uninstall <kind/name>` | 按安装清单卸载（`--target --dir`；省略 `--target` 时扫描全部已知目标），删除包文件/目录与清单 |
 | `audit` | 审计日志查询/校验/导出：`audit [--limit --offset --action --actor --target --from --to --json]`；`audit verify [--all]` 校验哈希链（断链 exit 1）；`audit export --format csv\|jsonl [--out 文件]`（需 reviewer） |
 | `verify-signature <kind/name[@version]>` | 验证内容签名（ed25519）；同时重算磁盘内容哈希发现篡改（`--json`） |
 | `keys [--mine]` | 导出平台签名公钥（可离线验签）；`--mine` 查看自己的发布者公钥 |
@@ -265,7 +267,7 @@ my-plugin/
 
 每次安装都会写入 `.agentdock-install.json` 清单（来源、版本、内容哈希、时间、目标）。目标已存在时默认冲突并拒绝覆盖，加 `--force` 覆盖同名文件；目录目标不会清理旧版本遗留的多余文件，需要干净安装时请先手动删除目标目录。
 
-安装前可选本地复检：`--scan` 在落盘前重新跑一遍安全扫描（高危命中默认中止，确认可信时加 `--allow-risk` 跳过）；`--verify` 调服务端 `signature?verify=1` 做签名与内容哈希复验。`upgrade` 同样支持这三个参数。
+安装前默认本地复检：落盘前重新跑安全扫描并调用服务端 `signature?verify=1` 做签名/内容哈希复验，任何一项失败都会中止（确认可信时加 `--allow-risk`；`--no-verify` 完全跳过）。`upgrade`、`rollback` 同样适用。
 
 > **Web 端「安装」的边界**：Web 市场运行在服务端，浏览器无法直接写成员电脑的磁盘，所以页面上的「安装到平台主机」只写入**运行 AgentDock 的那台机器**（适合单机/all-in-one 演示、或管理员代装）。面向团队时请让成员在**自己的机器**上执行 CLI：版本的「成员本机安装」区会生成 `agentdock install <kind>/<name>@<version> --target …` 命令（可一键复制）并支持「下载 JSON 包」，成员配好自己的 `AGENTDOCK_URL` 与令牌后执行即可。
 
@@ -302,7 +304,7 @@ agentdock sync push github skill/code-reviewer@0.2.0 \
 
 ## 版本检查与升级
 
-每次安装都会写一份安装清单（`<目标目录>/.agentdock-install.json`；Claude Code 的 agent 为 `<name>.agentdock.json`；`dsh-agent` 为 `<name>.agentdock.json`），记录包名、版本与安装时间。`outdated` 扫描这些清单并与服务端 `latestVersion` 比较；`upgrade` 重新下载最新（或指定）版本、`--force` 覆盖同名文件、重新上报安装计数。
+每次安装都会写一份安装清单（`<目标目录>/.agentdock-install.json`；Claude Code 的 agent 为 `<name>.agentdock.json`；`dsh-agent` 为 `<name>.agentdock.json`），记录包名、版本、contentHash、安装目标与最近 5 个版本历史；`uninstall` 直接按清单删除，`rollback` 取历史末尾版本重新安装。`outdated` 扫描这些清单并与服务端 `latestVersion` 比较；`upgrade` 重新下载最新（或指定）版本、`--force` 覆盖同名文件、重新上报安装计数。
 
 ```bash
 agentdock outdated                              # 扫描 ~/.dsh / ~/.claude / ~/.codex / ~/.agents 的安装记录
@@ -597,7 +599,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（113 个用例）
+├── tests/                   # node:test 测试（116 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 

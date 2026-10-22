@@ -87,7 +87,8 @@ function writeContent(file) {
   return Buffer.from(String(file.content ?? ''), 'utf8');
 }
 
-function manifestFile(bundle, manifestPath, targetPath = path.basename(manifestPath)) {
+function manifestFile(bundle, manifestPath, targetPath = path.basename(manifestPath), options = {}) {
+  const history = Array.isArray(options.history) ? options.history.slice(-5) : [];
   return {
     path: manifestPath,
     targetPath,
@@ -95,8 +96,11 @@ function manifestFile(bundle, manifestPath, targetPath = path.basename(manifestP
     content: `${JSON.stringify(
       {
         package: { kind: bundle.kind, name: bundle.name, version: bundle.version },
+        contentHash: bundle.contentHash || null,
+        target: options.target || null,
         installedAt: nowIso(),
         source: 'agentdock',
+        history,
       },
       null,
       2,
@@ -108,7 +112,7 @@ function manifestFile(bundle, manifestPath, targetPath = path.basename(manifestP
  * 规划一次安装（不写盘）。
  * @param {{kind:string,name:string,version:string,files:Array<{path:string,content:string,encoding:string}>}} bundle
  */
-export function planInstall(bundle, { target, home = os.homedir(), dir, force = false } = {}) {
+export function planInstall(bundle, { target, home = os.homedir(), dir, force = false, history = [] } = {}) {
   if (!bundle || !bundle.kind || !bundle.name || !Array.isArray(bundle.files)) {
     throw badRequest('安装包数据不完整');
   }
@@ -171,7 +175,9 @@ export function planInstall(bundle, { target, home = os.homedir(), dir, force = 
     dest.layout === 'file'
       ? path.join(dest.baseDir, `${bundle.name}.agentdock.json`)
       : path.join(dest.absolutePath, '.agentdock-install.json');
-  files.push(manifestFile(bundle, manifestPath, path.relative(dest.baseDir, manifestPath)));
+  files.push(
+    manifestFile(bundle, manifestPath, path.relative(dest.baseDir, manifestPath), { history, target }),
+  );
 
   return { target, dest, files, notes, manifestPath, force };
 }
@@ -190,6 +196,54 @@ export function applyInstall(plan) {
     manifestPath: plan.manifestPath,
     notes: plan.notes,
   };
+}
+
+/**
+ * 规划卸载（不写盘）：按安装清单定位包的文件/目录。
+ * - dir 布局：删除整个包目录（含清单）
+ * - file 布局（Claude agent）：删除单文件、sidecar 目录与清单
+ * - dsh-preset：删除 preset 片段与清单
+ */
+export function uninstallPlan({ kind, name, target, home = os.homedir(), dir } = {}) {
+  if (!TARGET_LABEL[target]) throw badRequest(`未知安装目标：${target}`);
+  const dest = installDestination(kind, name, { target, home, dir });
+  const manifestPath =
+    dest.layout === 'dir'
+      ? path.join(dest.absolutePath, '.agentdock-install.json')
+      : path.join(dest.baseDir, `${name}.agentdock.json`);
+  const manifest = readJson(manifestPath, null);
+  if (!manifest) throw notFound(`未找到安装记录：${manifestPath}`);
+  const paths = [];
+  if (dest.layout === 'dir') {
+    paths.push(dest.absolutePath);
+  } else if (dest.layout === 'file') {
+    paths.push(dest.absolutePath, path.join(dest.baseDir, `${name}.agentdock`), manifestPath);
+  } else {
+    paths.push(dest.absolutePath, manifestPath);
+  }
+  return { target, dest, absolutePath: dest.absolutePath, manifestPath, layout: dest.layout, paths, manifest };
+}
+
+export function applyUninstall(plan) {
+  const removed = [];
+  for (const targetPath of plan.paths) {
+    if (!fs.existsSync(targetPath)) continue;
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    removed.push(targetPath);
+  }
+  return { absolutePath: plan.absolutePath, removed, removedFiles: removed.length, target: plan.target, layout: plan.layout };
+}
+
+/**
+ * 读取某目标的安装清单（返回 manifest 或 null），供 install/upgrade/rollback 记录历史。
+ */
+export function readInstallManifest({ kind, name, target, home = os.homedir(), dir } = {}) {
+  const dest = installDestination(kind, name, { target, home, dir });
+  const manifestPath =
+    dest.layout === 'dir'
+      ? path.join(dest.absolutePath, '.agentdock-install.json')
+      : path.join(dest.baseDir, `${name}.agentdock.json`);
+  return { manifestPath, manifest: readJson(manifestPath, null) };
 }
 
 /**
