@@ -24,6 +24,7 @@ import {
 } from './signing.mjs';
 import { buildSbom } from './sbom.mjs';
 import { evaluateAutoApproval, defaultPolicy } from './policy.mjs';
+import { qualityOf } from './quality.mjs';
 
 export const VERSION_STATUSES = ['pending', 'published', 'rejected'];
 export const VERSION_STATUS_LABEL = { pending: '待审核', published: '已发布', rejected: '已拒绝' };
@@ -580,6 +581,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       totalBytes: latest.totalBytes,
       manifest: latest.manifest,
       scanSummary: latest.scan?.summary ?? null,
+      quality: qualityOf(latest),
     };
   }
 
@@ -614,6 +616,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
         ...item,
         statusLabel: VERSION_STATUS_LABEL[item.status],
         manifestDescription: describeBundle(item.manifest),
+        quality: qualityOf(item),
       })),
     };
   }

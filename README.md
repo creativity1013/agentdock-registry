@@ -287,6 +287,19 @@ agentdock sync push github skill/code-reviewer@0.2.0 \
 - 与 skills.sh 的配合：skills.sh 的技能目录以 GitHub 上的 `SKILL.md` 为来源，用同一命令把 skill 推到对应公开仓库（路径/分支按目标仓库约定），再走它自己的目录收录/PR 流程；无需 AgentDock 侧额外适配器。
 - 需要从平台内一键推送时，应作为独立的管理端插件/CLI 扩展，而不是把 GitHub 令牌放进服务端。
 
+## 质量分级
+
+每个版本都会从元数据推导出质量等级（不新增存储，随版本详情/市场列表一起返回）：
+
+| 等级 | 条件 |
+|---|---|
+| 社区 `community` | 仅已上架（无平台签名或未审核） |
+| 已验证 `verified` | 平台签名 + 审核通过（人工或策略自动）+ 无高危 |
+| 官方 `official` | 已验证 + 发布者签名 + 人工审核 + 无高危/中危 |
+
+- Web 市场卡片/详情、`agentdock list` 的「质量」列、`agentdock quality <kind>/<name>[@version]`、API 的 `quality` 字段均可查看；自动审批策略的信任分流（`trustedPublishers` + `requirePublisherSignature`）与质量分级共同构成「信任等级」。
+- 质量等级是**展示与分流的辅助信号**，不替代签名/透明日志校验：安装与验签始终以内容哈希和签名为准。
+
 ## 版本检查与升级
 
 每次安装都会写一份安装清单（`<目标目录>/.agentdock-install.json`；Claude Code 的 agent 为 `<name>.agentdock.json`；`dsh-agent` 为 `<name>.agentdock.json`），记录包名、版本与安装时间。`outdated` 扫描这些清单并与服务端 `latestVersion` 比较；`upgrade` 重新下载最新（或指定）版本、`--force` 覆盖同名文件、重新上报安装计数。

@@ -165,6 +165,12 @@ async function main() {
   );
   await runCli(['review', 'approve', 'skill/code-reviewer@0.2.0', '--note', 'signed smoke'], tokens.reviewer);
 
+  const qualityOut = await runCli(['quality', 'skill/code-reviewer@0.2.0'], tokens.reviewer);
+  assert(qualityOut.includes('官方'), `质量分级应为官方：\n${qualityOut}`);
+  assert(qualityOut.includes('发布者签名：✓'), `质量分级缺少发布者签名：\n${qualityOut}`);
+  const qualityList = await runCli(['list'], tokens.reviewer);
+  assert(qualityList.includes('官方'), `list 应显示质量列：\n${qualityList}`);
+  console.log('✓ 质量分级：发布者签名 + 人工审核 → 官方');
   const transparencyEntries = await runCli(['transparency', 'entries', '--limit', '10'], tokens.reviewer);
   assert(transparencyEntries.includes('skill/code-reviewer@0.2.0'), '透明日志缺少带发布者签名的版本');
   const transparencyVerify = await runCli(['transparency', 'verify'], tokens.reviewer);

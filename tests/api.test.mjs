@@ -799,3 +799,56 @@ test('自动审批策略与 SBOM：权限、自动上架、透明日志、SBOM �
     transparency.data.items.some((entry) => entry.name === 'auto-skill' && entry.review?.auto === true),
   );
 });
+
+test('质量分级：仅人工审核 → 已验证；发布者签名 + 人工审核 → 官方', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.close());
+  const { request, tokens } = server;
+  const makeSkill = (name) =>
+    skillPayload({
+      name,
+      files: [
+        {
+          path: 'SKILL.md',
+          encoding: 'utf8',
+          content: `---\nname: ${name}\ndescription: 质量分级测试\n---\n\n# ${name}\n`,
+        },
+      ],
+    });
+
+  const plain = await request('POST', '/packages', { token: tokens.publisher, body: makeSkill('grade-plain') });
+  assert.equal(plain.status, 201, JSON.stringify(plain.data));
+  await request('POST', '/review', {
+    token: tokens.reviewer,
+    body: { kind: 'skill', name: 'grade-plain', version: '0.1.0', decision: 'approve', note: 'LGTM' },
+  });
+  const plainDetail = await request('GET', '/packages/skill/grade-plain');
+  assert.equal(plainDetail.data.versions[0].quality.level, 'verified');
+  assert.equal(plainDetail.data.versions[0].quality.label, '已验证');
+  const list = await request('GET', '/packages');
+  assert.equal(list.data.items.find((item) => item.name === 'grade-plain').quality.level, 'verified');
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const payload = makeSkill('grade-signed');
+  const contentHash = normalizeBundle(payload).bundle.contentHash;
+  const signature = crypto
+    .sign(
+      null,
+      Buffer.from(publisherSignaturePayload({ kind: 'skill', name: 'grade-signed', version: '0.1.0', contentHash })),
+      crypto.createPrivateKey(privatePem),
+    )
+    .toString('base64');
+  const signed = await request('POST', '/packages', {
+    token: tokens.publisher,
+    body: { ...payload, publisherSignature: { signature, publicKey: publicKeyPemFromPrivate(privatePem) } },
+  });
+  assert.equal(signed.status, 201, JSON.stringify(signed.data));
+  await request('POST', '/review', {
+    token: tokens.reviewer,
+    body: { kind: 'skill', name: 'grade-signed', version: '0.1.0', decision: 'approve', note: 'LGTM' },
+  });
+  const signedDetail = await request('GET', '/packages/skill/grade-signed');
+  assert.equal(signedDetail.data.versions[0].quality.level, 'official');
+  assert.equal(signedDetail.data.versions[0].quality.checks.publisherSigned, true);
+});

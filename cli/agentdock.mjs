@@ -18,6 +18,7 @@ import { resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
 import { publisherSignaturePayload, publicKeyPemFromPrivate } from '../src/signing.mjs';
 import { verifyInclusionProof } from '../src/transparency.mjs';
 import { pushToGitHub } from '../src/registry.mjs';
+import { QUALITY_LABEL } from '../src/quality.mjs';
 import { compareVersions, formatBytes } from '../src/util.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -440,13 +441,36 @@ async function cmdList(flags) {
       `${item.kind}/${item.name}`,
       item.latestVersion,
       item.status,
-      KIND_LABEL[item.kind] || item.kind,
+      QUALITY_LABEL[item.quality?.level] || item.quality?.level || '-',
       item.installs,
       item.description || '',
     ]),
-    ['包', '版本', '状态', '类型', '安装', '描述'],
+    ['包', '版本', '状态', '质量', '安装', '描述'],
   );
   console.log(`\n共 ${data.total} 个包`);
+}
+
+async function cmdQuality(positionals, flags) {
+  const conn = resolveConnection(flags);
+  const spec = parseSpec(positionals[0]);
+  const detail = await api(conn, 'GET', `/api/v1/packages/${spec.kind}/${spec.name}`);
+  const version = spec.version || detail.latestVersion;
+  if (!version) throw new Error('该包还没有已发布版本');
+  const data = await api(
+    conn,
+    'GET',
+    `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}`,
+  );
+  const versionDoc = data?.quality ? data : (data?.version && typeof data.version === 'object' ? data.version : data);
+  if (flags.json) return console.log(JSON.stringify(versionDoc.quality || null, null, 2));
+  const quality = versionDoc.quality || { level: 'community', label: '社区', checks: {} };
+  console.log(`${spec.kind}/${spec.name}@${version}`);
+  console.log(`  质量：${quality.label}（${quality.level}）`);
+  const checks = quality.checks || {};
+  const mark = (value) => (value ? '✓' : '✗');
+  console.log(`  平台签名：${mark(checks.signed)}   发布者签名：${mark(checks.publisherSigned)}`);
+  console.log(`  审核通过：${mark(checks.reviewed)}   人工审核：${mark(checks.humanReview)}`);
+  console.log(`  无高危：${mark(checks.scanNoHigh)}   无高危/中危：${mark(checks.scanClean)}`);
 }
 
 /** 安装/升级前的本地复检：安全扫描（--scan）与签名校验（--verify） */
@@ -1291,6 +1315,8 @@ async function main() {
       return cmdReview(positionals, flags);
     case 'audit':
       return cmdAudit(positionals, flags);
+    case 'quality':
+      return cmdQuality(positionals, flags);
     case 'keys':
       return cmdKeys(flags);
     case 'verify-signature':

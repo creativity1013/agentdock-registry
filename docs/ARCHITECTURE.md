@@ -250,6 +250,7 @@ data/
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
 | `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
 | `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、GitHub 推送、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`pushToGitHub`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
+| `src/quality.mjs` | 质量分级推导：community / verified / official（由签名、审核与扫描元数据计算，不落库） | `qualityOf`、`QUALITY_LABEL`、`QUALITY_LEVELS` |
 | `src/sbom.mjs` | 版本 SBOM 生成与 digest（文件哈希 + 工具/MCP/技能组件） | `buildSbom`、`sbomDigest`、`SBOM_SCHEMA` |
 | `src/policy.mjs` | 自动审批策略：归一化/校验/规则求值/读写 | `normalizePolicy`、`evaluateAutoApproval`、`loadPolicy`、`savePolicy`、`defaultPolicy` |
 | `src/backend.mjs` | 元数据后端选择与统一接口（json / sqlite） | `createBackend`、`describeBackends`、`BACKEND_KINDS` |

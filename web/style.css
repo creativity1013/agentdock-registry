@@ -391,6 +391,18 @@ select:focus {
   color: var(--amber);
 }
 
+.chip.quality-verified {
+  background: #e6f7ee;
+  color: #1a7f4b;
+  border-color: #bfe8d2;
+}
+
+.chip.quality-official {
+  background: #fff4d6;
+  color: #8a5a00;
+  border-color: #f0d79a;
+}
+
 .chip.auto {
   background: rgba(139, 92, 246, 0.16);
   color: #a78bfa;

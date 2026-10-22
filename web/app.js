@@ -72,6 +72,13 @@ function statusChip(status, label) {
   return h('span', { class: `chip ${status}` }, label || status);
 }
 
+const QUALITY_LABEL = { community: '社区', verified: '已验证', official: '官方' };
+
+function qualityChip(quality) {
+  if (!quality || !quality.level || quality.level === 'community') return null;
+  return h('span', { class: `chip quality-${quality.level}` }, QUALITY_LABEL[quality.level] || quality.label || quality.level);
+}
+
 function scanChips(scan) {
   if (!scan || !scan.summary || scan.summary.total === 0) {
     return [h('span', { class: 'chip' }, '扫描 · 无问题')];
@@ -363,7 +370,7 @@ function packageCard(item) {
       h('span', { class: 'package-name' }, item.name),
       h('span', { class: 'version' }, `v${item.latestVersion}`),
     ),
-    h('div', { class: 'card-meta' }, kindChip(item.kind), statusChip(item.status, item.status === 'published' ? '已发布' : item.status), ...scanChips(item.scanSummary ? { summary: item.scanSummary } : null)),
+    h('div', { class: 'card-meta' }, kindChip(item.kind), statusChip(item.status, item.status === 'published' ? '已发布' : item.status), qualityChip(item.quality), ...scanChips(item.scanSummary ? { summary: item.scanSummary } : null)),
     h('p', { class: 'package-desc' }, item.description || '(无描述)'),
     item.manifest?.capabilities ? h('div', { class: 'capabilities' }, describeCapabilities(item.manifest.capabilities)) : null,
     h(
@@ -721,6 +728,7 @@ function paintDetail() {
     h('h2', {}, pkg.name),
     selected ? h('span', { class: 'version' }, `v${selected.version}`) : null,
     selected ? statusChip(selected.status, selected.statusLabel) : null,
+    selected ? qualityChip(selected.quality) : null,
   );
 
   const sub = h('p', { class: 'detail-sub' }, pkg.description || '(无描述)');
@@ -734,6 +742,8 @@ function paintDetail() {
       { class: 'kv' },
       h('span', { class: 'k' }, '类型'),
       h('span', { class: 'v' }, KIND_LABEL[pkg.kind] || pkg.kind),
+      h('span', { class: 'k' }, '质量分级'),
+      h('span', { class: 'v' }, selected?.quality ? `${QUALITY_LABEL[selected.quality.level] || selected.quality.level}（${selected.quality.level}）` : '-'),
       h('span', { class: 'k' }, '最新版本'),
       h('span', { class: 'v' }, pkg.latestVersion ? `v${pkg.latestVersion}` : '-'),
       h('span', { class: 'k' }, '累计安装'),

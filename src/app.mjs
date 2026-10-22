@@ -10,6 +10,7 @@ import { AppError, badRequest, unauthorized, forbidden, notFound, unprocessable,
 import { LIMITS } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
 import { diffBundles } from './diff.mjs';
+import { qualityOf } from './quality.mjs';
 import { createTransparencyLog } from './transparency.mjs';
 import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
 import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, PolicyError } from './policy.mjs';
@@ -657,6 +658,7 @@ function publicVersion(versionDoc) {
     version: versionDoc.version,
     status: versionDoc.status,
     statusLabel: VERSION_STATUS_LABEL[versionDoc.status] || versionDoc.status,
+    quality: qualityOf(versionDoc),
     description: versionDoc.description,
     tags: versionDoc.tags,
     contentHash: versionDoc.contentHash,
