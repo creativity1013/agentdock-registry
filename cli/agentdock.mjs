@@ -37,11 +37,13 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
 
   agentdock list [--kind skill|agent|plugin] [--q 关键词] [--status published]
   agentdock install <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--force] [--profile <profile>]
+                    [--scan] [--verify] [--allow-risk]  安装前本地复检：安全扫描 / 验签
                                                    target=dsh-agent 生成 DSH preset 片段；--profile 会并入该 profile 的 cordis.patch.yml
 
   agentdock outdated [--target <target>] [--dir <路径>] [--json]
                                                    检查本地已安装包是否有新版本（读取安装清单）
   agentdock upgrade <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--profile <profile>]
+                    [--scan] [--verify] [--allow-risk]  升级前同样可本地复检
                                                    升级本地安装到最新（或指定）版本，默认覆盖同名文件
 
   agentdock verify-signature <kind>/<name>[@version]
@@ -444,6 +446,34 @@ async function cmdList(flags) {
   console.log(`\n共 ${data.total} 个包`);
 }
 
+/** 安装/升级前的本地复检：安全扫描（--scan）与签名校验（--verify） */
+async function preflightInstall(conn, bundle, flags) {
+  if (flags.scan) {
+    const report = analyzeInput(bundle);
+    const summary = report.scan.summary;
+    console.log(`  安装前扫描：高危 ${summary.high} / 中危 ${summary.medium} / 低危 ${summary.low}`);
+    for (const finding of report.scan.findings.slice(0, 3)) {
+      const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
+      console.log(`  ! [${finding.severity}] ${finding.ruleId} ${location} ${finding.title}`);
+    }
+    if (report.blocked && !flags['allow-risk']) {
+      throw new Error('安装前扫描命中高危规则，已中止（如确认可信，加 --allow-risk 跳过）');
+    }
+  }
+  if (flags.verify) {
+    const result = await api(
+      conn,
+      'GET',
+      `/api/v1/packages/${bundle.kind}/${bundle.name}/versions/${encodeURIComponent(bundle.version)}/signature?verify=1`,
+    );
+    if (result.valid) {
+      console.log(`  签名校验：✓ ${result.algorithm} ${String(result.keyId || '').slice(0, 16)}…`);
+    } else {
+      console.log(`  ! 签名校验失败：${(result.reasons || []).join('；') || '未知原因'}`);
+    }
+  }
+}
+
 /** 检查本地已安装包是否有新版本 */
 async function cmdOutdated(flags) {
   const conn = resolveConnection(flags);
@@ -506,6 +536,7 @@ async function cmdUpgrade(positionals, flags) {
     'GET',
     `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/bundle`,
   );
+  await preflightInstall(conn, bundleData.bundle, flags);
   const plan = planInstall(bundleData.bundle, { target, home, dir: flags.dir, force: true });
   applyInstall(plan);
   const summary = summarizePlan(plan, { home });
@@ -550,6 +581,7 @@ async function cmdInstall(positionals, flags) {
     'GET',
     `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/bundle`,
   );
+  await preflightInstall(conn, bundleData.bundle, flags);
   const target = flags.target || 'dsh';
   if (!TARGET_LABEL[target]) throw new Error(`未知安装目标：${target}（可选：${TARGET_IDS.join(' / ')}）`);
   const plan = planInstall(bundleData.bundle, {

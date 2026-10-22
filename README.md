@@ -122,7 +122,7 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `list` | 列出已发布能力包（`--kind --json`） |
 | `review queue` | 列出待审核版本 |
 | `review approve\|reject <kind/name@version>` | 审核操作（`--note`） |
-| `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段 |
+| `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段；`--scan`/`--verify` 安装前本地复检 |
 | `outdated` | 扫描本地安装清单，对比服务端最新已发布版本（`--target --dir --json`）；有更新时 exit 0 |
 | `upgrade <kind/name[@version]>` | 升级本地安装到最新/指定版本（`--target --dir --force --profile`），默认覆盖同名文件并上报安装计数 |
 | `audit` | 审计日志查询/校验/导出：`audit [--limit --offset --action --actor --target --from --to --json]`；`audit verify [--all]` 校验哈希链（断链 exit 1）；`audit export --format csv\|jsonl [--out 文件]`（需 reviewer） |
@@ -263,6 +263,8 @@ my-plugin/
 `dsh-agent` 目标把 agent 包转成 DSH 的 preset 条目：frontmatter 的 `tools` 映射成插件行（`tool-fs` / `tool-fs-search` / `tool-bash` / `tool-web` / `tool-todo` 等），正文成为 `@deepseek-ai/dsh-persona` 的 `prefix` 系统提示，`skills` 会加上 `skill-filesystem` + `tool-skill`。片段有两种启用方式：临时用 `dsh <profile> --patch <片段文件>` 挂载，或加 `--profile <name>` 由 AgentDock 以带标记的块（`# >>> agentdock preset <id>`）追加进 profile 的 `cordis.patch.yml`，重复执行会替换旧块而不是叠加。`DSH_HOME` 环境变量会覆盖 `~`（用于多 profile/测试）。注意 DSH 的 preset **不携带模型**：`model: sonnet` 这类字段无法映射，模型由会话或 `agent-default-model` 决定。启用后重启 DSH，在 Settings → Agent presets 中选择 `AgentDock · <name>`。
 
 每次安装都会写入 `.agentdock-install.json` 清单（来源、版本、内容哈希、时间、目标）。目标已存在时默认冲突并拒绝覆盖，加 `--force` 覆盖同名文件；目录目标不会清理旧版本遗留的多余文件，需要干净安装时请先手动删除目标目录。
+
+安装前可选本地复检：`--scan` 在落盘前重新跑一遍安全扫描（高危命中默认中止，确认可信时加 `--allow-risk` 跳过）；`--verify` 调服务端 `signature?verify=1` 做签名与内容哈希复验。`upgrade` 同样支持这三个参数。
 
 > **Web 端「安装」的边界**：Web 市场运行在服务端，浏览器无法直接写成员电脑的磁盘，所以页面上的「安装到平台主机」只写入**运行 AgentDock 的那台机器**（适合单机/all-in-one 演示、或管理员代装）。面向团队时请让成员在**自己的机器**上执行 CLI：版本的「成员本机安装」区会生成 `agentdock install <kind>/<name>@<version> --target …` 命令（可一键复制）并支持「下载 JSON 包」，成员配好自己的 `AGENTDOCK_URL` 与令牌后执行即可。
 

@@ -289,6 +289,8 @@ data/
 
 冲突策略：目标已存在 → `AppError(409)`；`force` 时只覆盖同名文件，不清理旧目录中的多余文件。
 
+安装器可在落盘前做本地复检（`install/upgrade --scan` 复用 `analyzeInput` 的扫描，`--verify` 调签名验签接口）；高危命中默认中止，`--allow-risk` 显式跳过。
+
 `listInstalls({home, dir, targets})` 反向读取这些清单（dir 布局读 `<dir>/.agentdock-install.json`，Claude agent / dsh-agent 读 `<name>.agentdock.json`），供 CLI `outdated` 与 `upgrade` 使用：`outdated` 对比服务端 `latestVersion`，`upgrade` 复用 `planInstall(force: true)` 覆盖安装。清单只含包名/版本/时间，不记录文件哈希，因此升级检查不会发现本地文件被手工修改（完整性校验请用 `verify-signature`）。
 
 ## 7. 与 DSH 集成

@@ -84,7 +84,12 @@ async function main() {
 
   // 安装：skill → 自定义目录；agent → Claude Code；plugin → DSH
   const installDir = path.join(root, 'install-target');
-  await runCli(['install', 'skill/code-reviewer', '--target', 'dir', '--dir', installDir, '--force'], tokens.publisher);
+  const installOut = await runCli(
+    ['install', 'skill/code-reviewer', '--target', 'dir', '--dir', installDir, '--force', '--scan', '--verify'],
+    tokens.publisher,
+  );
+  assert(installOut.includes('安装前扫描') && installOut.includes('高危 0'), '安装前扫描输出异常');
+  assert(installOut.includes('签名校验：✓'), '安装前签名校验未通过');
   assert(fs.existsSync(path.join(installDir, 'skills', 'code-reviewer', 'SKILL.md')), 'skill 安装失败');
   assert(fs.existsSync(path.join(installDir, 'skills', 'code-reviewer', '.agentdock-install.json')), '缺少安装清单');
 
