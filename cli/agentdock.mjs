@@ -17,6 +17,7 @@ import {
 import { resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
 import { publisherSignaturePayload, publicKeyPemFromPrivate } from '../src/signing.mjs';
 import { verifyInclusionProof } from '../src/transparency.mjs';
+import { pushToGitHub } from '../src/registry.mjs';
 import { compareVersions, formatBytes } from '../src/util.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,6 +67,8 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock sync import mcp <server-name> [--version 1.0.0] [--dry-run]
                                                    从 MCP registry 导入 server 为 plugin 能力包
   agentdock sync export [--out <文件>]             导出中立市场目录（agentdock-marketplace@1）
+  agentdock sync push github <kind>/<name>[@version] --repo <owner/repo> [--path 子目录] [--branch main]
+                    [--message "..."] [--dry-run]  把已上架能力包推送为 GitHub 单次 commit（需 GITHUB_TOKEN）
 
   agentdock review list                            审核队列（需 reviewer 角色）
   agentdock review approve <kind>/<name>@<version> [--note "..."]
@@ -960,7 +963,52 @@ async function cmdSync(positionals, flags) {
     return;
   }
 
-  throw new Error('用法：agentdock sync sources | import github|mcp <目标> | export [--out 文件]');
+  if (sub === 'push') {
+    const type = positionals[1];
+    if (type !== 'github') {
+      throw new Error('推送目前只支持 GitHub：agentdock sync push github <kind>/<name>[@version> --repo <owner/repo>');
+    }
+    const spec = parseSpec(positionals[2]);
+    const repo = flags.repo ? String(flags.repo) : '';
+    if (!repo) throw new Error('缺少 --repo <owner/repo>');
+    const branch = flags.branch ? String(flags.branch) : 'main';
+    const basePath = flags.path ? String(flags.path) : '';
+    let version = spec.version;
+    if (!version) {
+      const detail = await api(conn, 'GET', `/api/v1/packages/${spec.kind}/${spec.name}`);
+      version = detail.latestVersion;
+      if (!version) throw new Error('该包还没有已发布版本');
+    }
+    const bundleData = await api(
+      conn,
+      'GET',
+      `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/bundle`,
+    );
+    const files = bundleData.bundle.files || [];
+    if (flags['dry-run']) {
+      console.log(`▸ 推送预检：${spec.kind}/${spec.name}@${version} → github ${repo}@${branch}${basePath ? `/${basePath}` : ''}`);
+      console.log(`  将写入 ${files.length} 个文件（单次 commit）：`);
+      for (const file of files) console.log(`  - ${basePath ? `${basePath.replace(/\/+$/, '')}/${file.path}` : file.path}`);
+      console.log('  （dry-run：未调用 GitHub API）');
+      return;
+    }
+    const token = (flags['github-token'] && String(flags['github-token'])) || process.env.GITHUB_TOKEN || '';
+    const result = await pushToGitHub({
+      repo,
+      path: basePath,
+      branch,
+      token,
+      message: flags.message
+        ? String(flags.message)
+        : `chore(agentdock): sync ${spec.kind}/${spec.name}@${version}`,
+      files,
+    });
+    console.log(`✓ 已推送到 GitHub：${repo}@${branch}（${result.files} 个文件，commit ${result.commit.slice(0, 10)}…）`);
+    console.log(`  ${result.url}`);
+    return;
+  }
+
+  throw new Error('用法：agentdock sync sources | import github|mcp <目标> | export [--out 文件] | push github <包> --repo <owner/repo>');
 }
 
 async function cmdReview(positionals, flags) {

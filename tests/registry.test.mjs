@@ -10,6 +10,7 @@ import {
   mcpServerToPlugin,
   slugifyName,
   buildMarketplaceCatalog,
+  pushToGitHub,
   RegistryError,
 } from '../src/registry.mjs';
 
@@ -254,4 +255,80 @@ test('网络错误映射为 RegistryError：超时 504，连接失败 502', asyn
     assert.match(error.message, /无法访问外部 registry/);
     return true;
   });
+});
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => resolve(raw ? JSON.parse(raw) : null));
+  });
+}
+
+test('GitHub 推送：一次 commit 写入全部文件，包含 base_tree 与 ref 更新', async () => {
+  const calls = [];
+  const mock = await startMock(async (req, res) => {
+    const json = (status, data) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+    const url = new URL(req.url, 'http://mock');
+    calls.push({ method: req.method, path: url.pathname, body: req.method === 'GET' ? null : await readBody(req) });
+    if (url.pathname === '/repos/acme/skills/git/ref/heads/main') {
+      return json(200, { object: { sha: 'head111', type: 'commit' } });
+    }
+    if (url.pathname === '/repos/acme/skills/git/commits/head111') {
+      return json(200, { sha: 'head111', tree: { sha: 'basetree222' } });
+    }
+    if (url.pathname === '/repos/acme/skills/git/blobs' && req.method === 'POST') {
+      return json(201, { sha: `blob${calls.length}` });
+    }
+    if (url.pathname === '/repos/acme/skills/git/trees' && req.method === 'POST') {
+      return json(201, { sha: 'newtree333' });
+    }
+    if (url.pathname === '/repos/acme/skills/git/commits' && req.method === 'POST') {
+      return json(201, { sha: 'commit444' });
+    }
+    if (url.pathname === '/repos/acme/skills/git/refs/heads/main' && req.method === 'PATCH') {
+      return json(200, { ok: true });
+    }
+    return json(404, { message: 'not found' });
+  });
+  try {
+    const result = await pushToGitHub({
+      repo: 'acme/skills',
+      path: 'catalog/review',
+      branch: 'main',
+      token: 'gh-token',
+      apiBase: mock.url,
+      message: 'sync review',
+      files: [
+        { path: 'SKILL.md', encoding: 'utf8', content: '# review\n' },
+        { path: 'README.md', encoding: 'utf8', content: '# readme\n' },
+      ],
+    });
+    assert.equal(result.commit, 'commit444');
+    assert.equal(result.files, 2);
+    assert.match(result.url, /acme\/skills\/commit\/commit444/);
+
+    const treeCall = calls.find((call) => call.path === '/repos/acme/skills/git/trees');
+    assert.equal(treeCall.body.base_tree, 'basetree222');
+    assert.deepEqual(
+      treeCall.body.tree.map((entry) => entry.path),
+      ['catalog/review/SKILL.md', 'catalog/review/README.md'],
+    );
+    const blobCall = calls.find((call) => call.path === '/repos/acme/skills/git/blobs');
+    assert.equal(Buffer.from(blobCall.body.content, 'base64').toString('utf8'), '# review\n');
+    const refCall = calls.find((call) => call.method === 'PATCH' && call.path.endsWith('refs/heads/main'));
+    assert.deepEqual(refCall.body, { sha: 'commit444', force: false });
+
+    await assert.rejects(
+      () => pushToGitHub({ repo: 'acme/skills', token: '', apiBase: mock.url, files: [] }),
+      (error) => error instanceof RegistryError && error.status === 401,
+    );
+  } finally {
+    await mock.close();
+  }
 });

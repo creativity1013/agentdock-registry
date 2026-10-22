@@ -138,6 +138,7 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `sync sources` | 查看已配置的外部 registry 适配器（GitHub / MCP registry） |
 | `sync import github <owner/repo>` | 从 GitHub 目录导入 skill/agent/plugin（`--path --ref --version --dry-run`），进入待审核 |
 | `sync import mcp <server-name>` | 从 MCP registry 导入 server，转换为带 `mcp` 声明的 plugin 能力包 |
+| `sync push github <kind/name[@version]>` | 把已上架能力包推成 GitHub 单次 commit（`--repo --path --branch --message --dry-run`，需 `GITHUB_TOKEN`） |
 | `sync export [--out <文件>]` | 导出中立市场目录（`agentdock-marketplace@1`，含 bundleUrl/内容哈希/签名摘要） |
 
 ## 三个概念
@@ -267,6 +268,24 @@ my-plugin/
 安装前可选本地复检：`--scan` 在落盘前重新跑一遍安全扫描（高危命中默认中止，确认可信时加 `--allow-risk` 跳过）；`--verify` 调服务端 `signature?verify=1` 做签名与内容哈希复验。`upgrade` 同样支持这三个参数。
 
 > **Web 端「安装」的边界**：Web 市场运行在服务端，浏览器无法直接写成员电脑的磁盘，所以页面上的「安装到平台主机」只写入**运行 AgentDock 的那台机器**（适合单机/all-in-one 演示、或管理员代装）。面向团队时请让成员在**自己的机器**上执行 CLI：版本的「成员本机安装」区会生成 `agentdock install <kind>/<name>@<version> --target …` 命令（可一键复制）并支持「下载 JSON 包」，成员配好自己的 `AGENTDOCK_URL` 与令牌后执行即可。
+
+### 推送发布（GitHub / skills.sh）
+
+导入是 pull，推送是 push：`sync push` 把已上架版本的全部文件写到目标 GitHub 仓库的一个目录里，用 Git Data API 生成**单次 commit**（blobs → tree → commit → 更新 ref），适合把 AgentDock 作为内部审核网关、对外发布到公开技能仓库。
+
+```bash
+# 前置：在发布者机器上设置 GitHub 令牌（要求 repo 写权限）
+export GITHUB_TOKEN=ghp_xxx
+
+agentdock sync push github skill/code-reviewer@0.2.0 \
+  --repo acme/ai-skills --path skills/code-reviewer \
+  --branch main --message "sync reviewer skill"
+```
+
+- `--dry-run` 只打印将要写入的文件清单，不调用 GitHub API（可在无 token 环境做发布预检）。
+- 推送内容来自服务端已审核版本（自动带内容签名校验语义，但推送本身只搬运文件）；目标仓库的分支保护/PR 流程仍由 GitHub 决定。
+- 与 skills.sh 的配合：skills.sh 的技能目录以 GitHub 上的 `SKILL.md` 为来源，用同一命令把 skill 推到对应公开仓库（路径/分支按目标仓库约定），再走它自己的目录收录/PR 流程；无需 AgentDock 侧额外适配器。
+- 需要从平台内一键推送时，应作为独立的管理端插件/CLI 扩展，而不是把 GitHub 令牌放进服务端。
 
 ## 版本检查与升级
 

@@ -249,7 +249,7 @@ data/
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
 | `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
-| `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
+| `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、GitHub 推送、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`pushToGitHub`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
 | `src/sbom.mjs` | 版本 SBOM 生成与 digest（文件哈希 + 工具/MCP/技能组件） | `buildSbom`、`sbomDigest`、`SBOM_SCHEMA` |
 | `src/policy.mjs` | 自动审批策略：归一化/校验/规则求值/读写 | `normalizePolicy`、`evaluateAutoApproval`、`loadPolicy`、`savePolicy`、`defaultPolicy` |
 | `src/backend.mjs` | 元数据后端选择与统一接口（json / sqlite） | `createBackend`、`describeBackends`、`BACKEND_KINDS` |
@@ -377,6 +377,10 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 3. 同一 `analyzeInput` 流水线归一化/校验/扫描；`dryRun:true` 只返回预检报告。
 4. 通过校验后 `store.publish` 落库为 `pending`，进入审核队列；审核通过后获得平台签名与透明日志事件。
 5. 审计记录 `sync.import`（含 source 与告警数）。
+
+**推送（push，CLI 本地执行）**：
+
+`sync push github <kind/name[@version]> --repo <owner/repo> [--path <目录>]` 由发布者/运维在本地运行：先从 AgentDock 拉取已上架版本的 bundle，再用 GitHub Git Data API 生成单次 commit（blobs → tree（base_tree=分支当前树）→ commit → 更新 ref）。令牌只来自本地环境（`GITHUB_TOKEN`），服务端不保存外部写凭据；`--dry-run` 仅打印文件清单，不调用 GitHub。skills.sh 等以 GitHub 目录为来源的目录可复用同一路径。
 
 **导出（中立目录）**：
 

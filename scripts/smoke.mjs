@@ -200,7 +200,13 @@ async function main() {
   const catalog = JSON.parse(fs.readFileSync(exportFile, 'utf8'));
   assert(catalog.schema === 'agentdock-marketplace@1' && catalog.count >= 3, '导出的市场目录内容异常');
   assert(catalog.items.every((item) => item.bundleUrl && item.contentHash.length === 64), '市场目录缺少 bundleUrl/contentHash');
-  console.log('✓ 外部 registry：适配器信息与市场目录导出正常');
+  const pushDry = await runCli(
+    ['sync', 'push', 'github', 'skill/code-reviewer@0.2.0', '--repo', 'acme/skills', '--path', 'skills/code-reviewer', '--dry-run'],
+    tokens.publisher,
+  );
+  assert(pushDry.includes('推送预检') && pushDry.includes('SKILL.md'), `sync push dry-run 输出异常：\n${pushDry}`);
+  assert(pushDry.includes('未调用 GitHub API'), 'dry-run 不应调用 GitHub');
+  console.log('✓ 外部 registry：适配器信息、市场目录导出与推送预检正常');
 
   // SBOM + 自动审批策略
   const sbomOut = await runCli(['sbom', 'skill/code-reviewer@0.2.0'], tokens.publisher);

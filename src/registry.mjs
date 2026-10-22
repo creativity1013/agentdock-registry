@@ -36,16 +36,19 @@ function fetchImplOrDefault(fetchImpl) {
   return impl;
 }
 
-async function request(url, { fetchImpl, token = '', headers = {} } = {}) {
+async function request(url, { fetchImpl, token = '', headers = {}, method = 'GET', body } = {}) {
   let response;
   try {
     response = await fetchImplOrDefault(fetchImpl)(url, {
+      method,
       headers: {
         accept: 'application/json',
         'user-agent': 'agentdock-sync/1.0',
+        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...headers,
       },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (error) {
@@ -355,6 +358,90 @@ export async function describeImportedFiles(files, { kind, fallbackName } = {}) 
     version: normalizeSemver(version) || '0.1.0',
     description: description.slice(0, 1024),
     tags: [...new Set(tags.map((tag) => String(tag).slice(0, 32)))].slice(0, 10),
+  };
+}
+
+/**
+ * 把能力包文件推送到 GitHub 仓库（单次 commit，Git Data API）。
+ * 仅由运维/发布者在本地 CLI 使用，令牌来自调用方环境。
+ */
+export async function pushToGitHub({
+  repo,
+  path: basePath = '',
+  branch = 'main',
+  token = '',
+  apiBase = 'https://api.github.com',
+  message,
+  files = [],
+  fetchImpl = globalThis.fetch,
+}) {
+  if (!/^[^/\s]+\/[^/\s]+$/.test(String(repo || ''))) {
+    throw new RegistryError(`非法 GitHub 仓库（应为 owner/repo）：${repo}`, { status: 400 });
+  }
+  if (!token) throw new RegistryError('推送 GitHub 需要令牌（GITHUB_TOKEN 或 --github-token）', { status: 401 });
+  if (!Array.isArray(files) || files.length === 0) throw new RegistryError('没有可推送的文件', { status: 400 });
+
+  const api = String(apiBase || 'https://api.github.com').replace(/\/+$/, '');
+  const refPath = `${api}/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`;
+  const ref = await (await request(refPath, { fetchImpl, token })).json();
+  const headSha = ref.object?.sha;
+  if (!headSha) throw new RegistryError('无法读取 GitHub 分支 HEAD', { status: 502, details: ref });
+  const head = await (await request(`${api}/repos/${repo}/git/commits/${headSha}`, { fetchImpl, token })).json();
+  const baseTree = head.tree?.sha;
+
+  const treeEntries = [];
+  for (const file of files) {
+    const content = Buffer.from(
+      String(file.content ?? ''),
+      file.encoding === 'base64' ? 'base64' : 'utf8',
+    ).toString('base64');
+    const blob = await (
+      await request(`${api}/repos/${repo}/git/blobs`, {
+        fetchImpl,
+        token,
+        method: 'POST',
+        body: { content, encoding: 'base64' },
+      })
+    ).json();
+    const relative = String(file.path || '').replace(/^\/+/, '');
+    const target = basePath ? `${String(basePath).replace(/^\/+|\/+$/g, '')}/${relative}` : relative;
+    treeEntries.push({ path: target, mode: '100644', type: 'blob', sha: blob.sha });
+  }
+
+  const tree = await (
+    await request(`${api}/repos/${repo}/git/trees`, {
+      fetchImpl,
+      token,
+      method: 'POST',
+      body: { base_tree: baseTree, tree: treeEntries },
+    })
+  ).json();
+  const commit = await (
+    await request(`${api}/repos/${repo}/git/commits`, {
+      fetchImpl,
+      token,
+      method: 'POST',
+      body: {
+        message: message || `chore(agentdock): sync ${files.length} file(s)`,
+        tree: tree.sha,
+        parents: [headSha],
+      },
+    })
+  ).json();
+  await request(`${api}/repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+    fetchImpl,
+    token,
+    method: 'PATCH',
+    body: { sha: commit.sha, force: false },
+  });
+
+  return {
+    repo,
+    branch,
+    path: basePath,
+    commit: commit.sha,
+    files: files.length,
+    url: `https://github.com/${repo}/commit/${commit.sha}`,
   };
 }
 
