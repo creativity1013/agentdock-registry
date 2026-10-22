@@ -24,12 +24,13 @@ import {
   upsertProfilePatch,
   writePresetFragment,
 } from '../src/dsh-preset.mjs';
-import { resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
+import { loadConfig, resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
 import { publisherSignaturePayload, publicKeyPemFromPrivate } from '../src/signing.mjs';
 import { verifyInclusionProof } from '../src/transparency.mjs';
 import { pushToGitHub } from '../src/registry.mjs';
 import { QUALITY_LABEL } from '../src/quality.mjs';
 import { compareVersions, formatBytes } from '../src/util.mjs';
+import { BACKUP_EXTENSION, readBackup, restoreBackup, writeBackup } from '../src/backup.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_URL = 'http://127.0.0.1:7788';
@@ -91,6 +92,11 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock audit export --format csv|jsonl [--out <文件>] [过滤 flags]
                                                    导出审计记录（时间正序，CSV 按 RFC 4180 转义）
   agentdock tokens create <name> --role reviewer   创建令牌（需 admin 角色）
+
+  agentdock backup [--data <目录>] [--out <文件>] [--no-bootstrap]
+                                                   备份 data/ 为带校验和的 gzip 归档（默认 agentdock-backup-<时间>.json.gz）
+  agentdock restore <备份文件> [--data <目录>] [--force] [--dry-run]
+                                                   恢复备份到数据目录（需先停服；--dry-run 只校验）
 
 全局选项：
   --url <url>       服务地址（默认 ${DEFAULT_URL}，或 $AGENTDOCK_URL）
@@ -1397,6 +1403,46 @@ async function cmdImportClaude(flags) {
   if (presetsMode) console.log(`DSH preset 片段：已生成 ${presetsWritten} 个${targetProfile ? `，并已并入 profile「${targetProfile}」` : ''}。重启 DSH 后生效`);
 }
 
+/** 备份 data/ 目录（带 sha256 校验和的 gzip JSON） */
+async function cmdBackup(flags) {
+  const config = loadConfig();
+  const dataDir = flags.data ? path.resolve(String(flags.data)) : config.dataDir;
+  const out = flags.out
+    ? path.resolve(String(flags.out))
+    : path.join(ROOT, `agentdock-backup-${new Date().toISOString().replace(/[:.]/g, '-')}${BACKUP_EXTENSION}`);
+  const { file, manifest } = writeBackup({
+    dataDir,
+    out,
+    includeBootstrap: flags['no-bootstrap'] !== true,
+  });
+  console.log(`✓ 已备份 ${manifest.fileCount} 个文件（${formatBytes(manifest.totalBytes)}）`);
+  console.log(`  数据目录：${dataDir}`);
+  console.log(`  归档文件：${file}`);
+  console.log(`  校验摘要：${manifest.digest.slice(0, 16)}…`);
+  console.log('  恢复：agentdock restore <归档文件> --data <数据目录>（恢复前请停服）');
+}
+
+/** 从备份归档恢复 data/ 目录 */
+async function cmdRestore(positionals, flags) {
+  const input = positionals[0];
+  if (!input) throw new Error('用法：agentdock restore <备份文件> [--data <目录>] [--force] [--dry-run]');
+  const config = loadConfig();
+  const dataDir = flags.data ? path.resolve(String(flags.data)) : config.dataDir;
+  const file = path.resolve(input);
+  const preview = readBackup(file);
+  if (flags['dry-run']) {
+    const result = restoreBackup({ file, dataDir, force: Boolean(flags.force), dryRun: true });
+    console.log(`✓ 备份校验通过：${result.fileCount} 个文件（${formatBytes(result.totalBytes)}），dry-run 未写入`);
+    console.log(`  目标数据目录：${result.target}`);
+    return;
+  }
+  const result = restoreBackup({ file, dataDir, force: Boolean(flags.force), dryRun: false });
+  console.log(`✓ 已恢复 ${result.fileCount} 个文件（${formatBytes(result.totalBytes)}）→ ${result.target}`);
+  console.log('  备份时间：' + (result.createdAt || '未知'));
+  console.log('  请确认已停止旧服务，恢复后重新启动：agentdock serve');
+  if (preview.manifest.digest) console.log(`  校验摘要：${preview.manifest.digest.slice(0, 16)}…`);
+}
+
 /* ------------------------------ 入口 ------------------------------ */
 
 async function main() {
@@ -1458,6 +1504,10 @@ async function main() {
       return cmdSync(positionals, flags);
     case 'tokens':
       return cmdTokens(positionals, flags);
+    case 'backup':
+      return cmdBackup(flags);
+    case 'restore':
+      return cmdRestore(positionals, flags);
     case 'import-claude':
       return cmdImportClaude(flags);
     default:

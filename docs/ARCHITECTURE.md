@@ -272,6 +272,7 @@ data/
 | `src/oidc.mjs` | OIDC discovery + PKCE 授权码流程（零依赖，身份以 userinfo 为准） | `createOidcClient`（`discover/createPkcePair/createState/authorizeUrl/exchangeCode/userinfo/mapClaims/loginUrl`） |
 | `src/security.mjs` | Cookie 会话 CSRF 防护（双提交 Cookie + Origin 校验） | `checkCsrf`、`cookieValue`、`CSRF_COOKIE` |
 | `src/ratelimit.mjs` | 单机内存滑动窗口限流与来源 IP 解析 | `createRateLimiter`、`requestIp` |
+| `src/backup.mjs` | data/ 目录备份归档与恢复（gzip + 逐文件 sha256 + 路径校验） | `buildBackup`、`writeBackup`、`readBackup`、`restoreBackup` |
 | `src/audit.mjs` | 审计日志（哈希链 + 过滤 + 校验 + 导出 + 轮转） | `createAuditLog`（`append/read/verify/exportLines`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
@@ -384,6 +385,7 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖；另覆盖策略更新权限、自动审批上架、SBOM 接口与版本详情 SBOM 摘要。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
 - **存储后端测试**（`tests/sqlite.test.mjs`）：Node 24 上验证 SQLite 后端的发布/审核/安装持久化、重启恢复、db.json → sqlite 自动迁移与后端选择；Node 20/22 自动 skip。
 - **租户策略与配额测试**（`tests/tenant-policy.test.mjs`）：租户独立自动审批、跨租户互不可见/同名冲突、三类配额上限与非法配额 400。
+- **备份/恢复测试**（`tests/backup.test.mjs`）：gzip 往返、排除令牌、非空目录/force/dry-run、篡改与不安全路径拒绝、未压缩 JSON 兼容。
 - **安全测试**（`tests/security.test.mjs`）：限流滑动窗口与恢复、CSRF 校验矩阵、接口 429 + `Retry-After`。
 - **认证与多租户测试**（`tests/sso.test.mjs` / `tests/tenant.test.mjs`）：本地 mock OIDC（discovery/token/userinfo）验证 PKCE 登录、Cookie 会话与自动建号；多租户验证列表/详情/审核队列/统计隔离、跨租户 404 与同名冲突、非法租户名拒绝。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果；`smoke:sqlite` 用 SQLite 后端跑同一套。

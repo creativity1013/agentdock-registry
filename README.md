@@ -544,6 +544,23 @@ AgentDock 支持用外部 OIDC（Keycloak / Okta / Entra ID / Auth0 / Google 等
 
 已知边界：OIDC discovery 与 token 交换要求 IdP 通过 HTTPS 可达；本服务自身不做 TLS，公网部署请用反向代理终结 TLS（见「部署」）。会话 Cookie 为 HMAC 签名而非服务端会话表，改密/禁用账号后需等 8 小时过期或重启服务强制失效。
 
+## 备份与恢复
+
+`data/` 是唯一需要备份的目录（元数据库、包文件、用户/令牌、签名私钥、审计与透明日志、策略）。CLI 提供带校验和的零依赖归档：
+
+```bash
+# 备份（建议先停服；SQLite 运行中可能处于 WAL 未 checkpoint 状态）
+agentdock backup                          # 输出 ./agentdock-backup-<时间>.agentdock-backup.json.gz
+agentdock backup --data /srv/agentdock/data --out /backups/daily.json.gz
+agentdock backup --no-bootstrap           # 不包含初始化令牌明文文件
+
+# 恢复（必须停服；目标目录非空需 --force）
+agentdock restore /backups/daily.json.gz --data /srv/agentdock/data --dry-run
+agentdock restore /backups/daily.json.gz --data /srv/agentdock/data --force
+```
+
+归档格式：`gzip(JSON)`，`schema=agentdock-backup@1`，每个文件记录相对路径、字节数、sha256 与 base64 内容；恢复时逐文件校验路径安全（拒绝 `..`/绝对路径）与内容哈希，任何一项不符立即中止。签名私钥 `signing-key.json` 也在归档内，请把备份文件当作机密保管（写出权限 600）。
+
 ## 部署（Docker / CI）
 
 ### Docker
@@ -600,6 +617,7 @@ agentdock/
 │   ├── oidc.mjs             # OIDC discovery + PKCE 授权码流程
 │   ├── security.mjs         # CSRF 双提交校验（Cookie 会话）
 │   ├── ratelimit.mjs        # 内存滑动窗口限流 / 来源 IP 解析
+│   ├── backup.mjs           # 备份归档（gzip + sha256）与恢复校验
 │   ├── audit.mjs            # JSONL 审计（哈希链 + 多维过滤 + 校验 + 导出 + 轮转）
 │   ├── config.mjs           # 配置与数据目录
 │   ├── errors.mjs / util.mjs / yaml.mjs
@@ -609,7 +627,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（118 个用例）
+├── tests/                   # node:test 测试（123 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
