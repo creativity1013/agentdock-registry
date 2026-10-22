@@ -886,8 +886,41 @@ function actionControls(pkg, selected) {
       dirInput.style.display = targetSelect.value === 'dir' ? '' : 'none';
     });
     const force = h('input', { type: 'checkbox', id: 'install-force' });
+    const localCommand = `agentdock install ${pkg.kind}/${pkg.name}@${selected.version} --target <dsh|dsh-agent|claude|codex|shared|dir>`;
     nodes.push(
-      h('span', { class: 'hint' }, '安装到本机：'),
+      h('span', { class: 'hint' }, '成员本机安装（把命令复制到成员自己的机器执行）：'),
+      h('div', { class: 'cmd-row' },
+        h('code', { class: 'cmd' }, localCommand),
+        h('button', {
+          class: 'btn btn-ghost',
+          type: 'button',
+          onClick: async () => {
+            try {
+              await navigator.clipboard.writeText(localCommand);
+              toast('命令已复制', 'ok');
+            } catch {
+              toast('复制失败，请手动选择命令文本', 'error');
+            }
+          },
+        }, '复制'),
+        h('button', {
+          class: 'btn btn-ghost',
+          type: 'button',
+          onClick: async () => {
+            try {
+              const data = await api(`/packages/${pkg.kind}/${pkg.name}/versions/${selected.version}/bundle`);
+              const blob = new Blob([JSON.stringify(data.bundle ?? data, null, 2)], { type: 'application/json' });
+              const link = document.createElement('a');
+              link.href = URL.createObjectURL(blob);
+              link.download = `${pkg.kind}-${pkg.name}-${selected.version}.json`;
+              link.click();
+              setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+            } catch (error) {
+              toast(`下载失败：${error.message}`, 'error');
+            }
+          },
+        }, '下载 JSON 包')),
+      h('span', { class: 'hint' }, '安装到平台主机（仅单机/演示用；写入的是运行 AgentDock 的这台机器）：'),
       targetSelect,
       dirInput,
       h('label', { class: 'hint' }, force, ' 覆盖已有文件'),
@@ -915,7 +948,7 @@ function actionControls(pkg, selected) {
               });
               state.detail.installResult = result;
               paintDetail();
-              toast(`已安装到 ${result.absolutePath}`, 'ok');
+              toast(`已安装到平台主机 ${result.absolutePath}`, 'ok');
               refreshBadge();
             } catch (error) {
               toast(`安装失败：${error.message}`, 'error');
@@ -924,10 +957,10 @@ function actionControls(pkg, selected) {
             }
           },
         },
-        '安装',
+        '安装到平台主机',
       ),
       state.detail.installResult
-        ? h('span', { class: 'hint' }, `✓ ${state.detail.installResult.absolutePath}（${state.detail.installResult.installedFiles} 个文件）`)
+        ? h('span', { class: 'hint' }, `✓ 平台主机：${state.detail.installResult.absolutePath}（${state.detail.installResult.installedFiles} 个文件）`)
         : null,
     );
   }

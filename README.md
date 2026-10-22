@@ -262,6 +262,8 @@ my-plugin/
 
 每次安装都会写入 `.agentdock-install.json` 清单（来源、版本、内容哈希、时间、目标）。目标已存在时默认冲突并拒绝覆盖，加 `--force` 覆盖同名文件；目录目标不会清理旧版本遗留的多余文件，需要干净安装时请先手动删除目标目录。
 
+> **Web 端「安装」的边界**：Web 市场运行在服务端，浏览器无法直接写成员电脑的磁盘，所以页面上的「安装到平台主机」只写入**运行 AgentDock 的那台机器**（适合单机/all-in-one 演示、或管理员代装）。面向团队时请让成员在**自己的机器**上执行 CLI：版本的「成员本机安装」区会生成 `agentdock install <kind>/<name>@<version> --target …` 命令（可一键复制）并支持「下载 JSON 包」，成员配好自己的 `AGENTDOCK_URL` 与令牌后执行即可。
+
 ## HTTP API
 
 所有接口前缀 `/api/v1`，认证方式 `Authorization: Bearer <token>`（也支持 `x-agentdock-token`）。
