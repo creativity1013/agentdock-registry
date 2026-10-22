@@ -37,6 +37,8 @@ export function createUserDirectory(config) {
         role: seed.role,
         tenant: 'default',
         tokenHash: sha256(token),
+        disabled: false,
+        sessionEpoch: 0,
         createdAt: nowIso(),
       };
     });
@@ -65,7 +67,7 @@ export function createUserDirectory(config) {
     if (!token || typeof token !== 'string') return null;
     const hash = sha256(token);
     for (const user of state.users) {
-      if (!user.tokenHash) continue;
+      if (user.disabled || !user.tokenHash) continue;
       if (safeEqual(hash, user.tokenHash)) {
         return {
           id: user.id,
@@ -87,8 +89,29 @@ export function createUserDirectory(config) {
       tenant: user.tenant || 'default',
       auth: user.auth || 'token',
       email: user.email || '',
+      disabled: Boolean(user.disabled),
+      sessionEpoch: user.sessionEpoch || 0,
       createdAt: user.createdAt,
     }));
+  }
+
+  function setDisabled(userId, disabled) {
+    const user = state.users.find((item) => item.id === userId);
+    if (!user) throw notFound(`用户不存在：${userId}`);
+    if (Boolean(user.disabled) !== Boolean(disabled)) {
+      user.disabled = Boolean(disabled);
+      if (disabled) user.sessionEpoch = (user.sessionEpoch || 0) + 1; // 禁用即刻踢下线
+      writeJsonAtomic(usersFile, state);
+    }
+    return { id: user.id, name: user.name, disabled: Boolean(user.disabled), sessionEpoch: user.sessionEpoch || 0 };
+  }
+
+  function bumpSessionEpoch(userId) {
+    const user = state.users.find((item) => item.id === userId);
+    if (!user) throw notFound(`用户不存在：${userId}`);
+    user.sessionEpoch = (user.sessionEpoch || 0) + 1;
+    writeJsonAtomic(usersFile, state);
+    return { id: user.id, name: user.name, sessionEpoch: user.sessionEpoch };
   }
 
   function createToken({ name, role, tenant = 'default' }) {
@@ -108,6 +131,8 @@ export function createUserDirectory(config) {
       tenant,
       auth: 'token',
       tokenHash: sha256(token),
+      disabled: false,
+      sessionEpoch: 0,
       createdAt: nowIso(),
     };
     state.users.push(user);
@@ -134,6 +159,7 @@ export function createUserDirectory(config) {
         role: existing.role,
         tenant: existing.tenant || 'default',
         email: existing.email || '',
+        sessionEpoch: existing.sessionEpoch || 0,
         createdAt: existing.createdAt,
       };
     }
@@ -151,6 +177,8 @@ export function createUserDirectory(config) {
       oidcSub: subject,
       tokenHash: null,
       keys: [],
+      disabled: false,
+      sessionEpoch: 0,
       createdAt: nowIso(),
       lastLoginAt: nowIso(),
     };
@@ -244,6 +272,8 @@ export function createUserDirectory(config) {
     authenticate,
     list,
     createToken,
+    setDisabled,
+    bumpSessionEpoch,
     listKeys,
     registerKey,
     removeKey,

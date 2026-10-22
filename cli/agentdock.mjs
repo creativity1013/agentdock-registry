@@ -92,6 +92,9 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock audit export --format csv|jsonl [--out <文件>] [过滤 flags]
                                                    导出审计记录（时间正序，CSV 按 RFC 4180 转义）
   agentdock tokens create <name> --role reviewer   创建令牌（需 admin 角色）
+  agentdock users disable|enable <id或名字>         禁用/启用用户（禁用即踢下线，需 admin）
+  agentdock users revoke <id或名字>                 强制该用户所有会话下线（需 admin）
+  agentdock sessions revoke-all                     强制全员会话下线（需 admin）
 
   agentdock backup [--data <目录>] [--out <文件>] [--no-bootstrap]
                                                    备份 data/ 为带校验和的 gzip 归档（默认 agentdock-backup-<时间>.json.gz）
@@ -1298,6 +1301,41 @@ async function cmdTokens(positionals, flags) {
   console.log(`  令牌（只显示一次）：${data.token}`);
 }
 
+async function resolveAdminUser(conn, key) {
+  const data = await api(conn, 'GET', '/api/v1/admin/users');
+  const user = data.items.find((item) => item.id === key || item.name === key);
+  if (!user) throw new Error(`用户不存在：${key}`);
+  return user;
+}
+
+async function cmdUsers(positionals, flags) {
+  const action = positionals[0];
+  const key = positionals[1];
+  if (!['disable', 'enable', 'revoke'].includes(action) || !key) {
+    throw new Error('users 子命令：disable <id或名字> | enable <id或名字> | revoke <id或名字>');
+  }
+  const conn = resolveConnection(flags);
+  requireToken(conn);
+  const user = await resolveAdminUser(conn, key);
+  if (action === 'revoke') {
+    await api(conn, 'POST', `/api/v1/admin/users/${encodeURIComponent(user.id)}/revoke-sessions`);
+    console.log(`✓ 已强制下线 ${user.name} 的所有会话（sessionEpoch +1）`);
+    return;
+  }
+  await api(conn, 'PATCH', `/api/v1/admin/users/${encodeURIComponent(user.id)}`, {
+    disabled: action === 'disable',
+  });
+  console.log(`✓ 已${action === 'disable' ? '禁用' : '启用'}用户 ${user.name}${action === 'disable' ? '（会话已全部失效）' : ''}`);
+}
+
+async function cmdSessions(positionals, flags) {
+  if (positionals[0] !== 'revoke-all') throw new Error('sessions 子命令：revoke-all');
+  const conn = resolveConnection(flags);
+  requireToken(conn);
+  const data = await api(conn, 'POST', '/api/v1/admin/sessions/revoke-all', {});
+  console.log(`✓ 已强制全员会话下线（globalEpoch=${data.globalEpoch}）`);
+}
+
 async function cmdImportClaude(flags) {
   const dir = flags.dir || path.join(os.homedir(), '.claude', 'agents');
   if (!fs.existsSync(dir)) throw new Error(`目录不存在：${dir}`);
@@ -1502,6 +1540,12 @@ async function main() {
       return cmdPolicy(positionals, flags);
     case 'sync':
       return cmdSync(positionals, flags);
+    case 'users':
+      await cmdUsers(positionals, flags);
+      break;
+    case 'sessions':
+      await cmdSessions(positionals, flags);
+      break;
     case 'tokens':
       return cmdTokens(positionals, flags);
     case 'backup':

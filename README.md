@@ -136,6 +136,8 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `sbom <kind/name[@version]>` | 查看版本 SBOM：文件哈希、工具/MCP/技能组件与 digest（`--json`） |
 | `policy show\|set` | 自动审批策略：`show` 读取（reviewer），`set --file <policy.json>` 更新（admin） |
 | `tokens create\|list` | 令牌管理（需 admin） |
+| `users disable\|enable\|revoke <id或名字>` | 禁用/启用用户、强制其会话下线（需 admin） |
+| `sessions revoke-all` | 强制全员会话下线（需 admin） |
 | `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
 | `sync sources` | 查看已配置的外部 registry 适配器（GitHub / MCP registry） |
 | `sync import github <owner/repo>` | 从 GitHub 目录导入 skill/agent/plugin（`--path --ref --version --dry-run`），进入待审核 |
@@ -358,6 +360,9 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | GET | `/audit/export` | reviewer | 导出审计（`format=csv\|jsonl`，过滤参数同 `/audit`，时间正序） |
 | GET | `/admin/users` | admin | 用户列表 |
 | POST | `/admin/tokens` | admin | 创建令牌 `{name,role,tenant}`（`tenant` 缺省为 `default`） |
+| PATCH | `/admin/users/:id` | admin | 禁用/启用用户 `{disabled}`；禁用即刻踢下线 |
+| POST | `/admin/users/:id/revoke-sessions` | admin | 强制该用户所有会话下线（sessionEpoch +1） |
+| POST | `/admin/sessions/revoke-all` | admin | 强制全员会话下线（globalEpoch +1） |
 
 发布请求体即能力包 JSON：
 
@@ -542,7 +547,7 @@ AgentDock 支持用外部 OIDC（Keycloak / Okta / Entra ID / Auth0 / Google 等
 - 令牌/用户带 `tenant` 字段（`POST /api/v1/admin/tokens` 可指定）；审计与透明日志是全局视图（每条记录含操作者，后续可再按租户分区）。
 - 未启用 SSO 时行为不变：单租户 `default`，原有 Bearer 令牌继续可用。
 
-已知边界：OIDC discovery 与 token 交换要求 IdP 通过 HTTPS 可达；本服务自身不做 TLS，公网部署请用反向代理终结 TLS（见「部署」）。会话 Cookie 为 HMAC 签名而非服务端会话表，改密/禁用账号后需等 8 小时过期或重启服务强制失效。
+已知边界：OIDC discovery 与 token 交换要求 IdP 通过 HTTPS 可达；本服务自身不做 TLS，公网部署请用反向代理终结 TLS（见「部署」）。会话 Cookie 为 HMAC 签名，但携带用户级 `sessionEpoch` 与全局 `globalEpoch`：禁用用户会立即失效其会话、`revoke-sessions` 可踢单个用户、`revoke-all` 可强制全员重新登录（8h 过期是兜底，不是唯一手段）。
 
 ## 备份与恢复
 
@@ -634,7 +639,7 @@ agentdock/
 │   ├── backend.mjs          # 元数据后端选择（json / sqlite 统一接口）
 │   ├── sqlite.mjs           # node:sqlite 后端（关系表 + WAL + db.json 自动迁移）
 │   ├── auth.mjs             # 令牌/角色/发布者密钥/OIDC 账号
-│   ├── session.mjs          # 会话 Cookie（HMAC 签名，8h）
+│   ├── session.mjs          # 会话 Cookie（HMAC 签名 + 用户/全局世代吊销，8h）
 │   ├── oidc.mjs             # OIDC discovery + PKCE 授权码流程
 │   ├── security.mjs         # CSRF 双提交校验（Cookie 会话）
 │   ├── ratelimit.mjs        # 内存滑动窗口限流 / 来源 IP 解析
@@ -648,7 +653,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（123 个用例）
+├── tests/                   # node:test 测试（126 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 

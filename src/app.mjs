@@ -98,7 +98,9 @@ export function createApp(config = loadConfig()) {
       const payload = cookieValue ? sessions.verify(cookieValue) : null;
       if (payload) {
         const user = users.getUser(payload.uid);
-        if (user) {
+        const epochOk = Boolean(user) && (payload.userEpoch ?? 0) === (user.sessionEpoch || 0);
+        const globalOk = (payload.globalEpoch ?? 0) === sessions.currentGlobalEpoch();
+        if (user && !user.disabled && epochOk && globalOk) {
           authVia = 'session';
           auth = {
             id: user.id,
@@ -171,7 +173,7 @@ export function createApp(config = loadConfig()) {
       });
       res.writeHead(302, {
         Location: '/',
-        'Set-Cookie': sessions.cookieHeader(user.id, { secure }),
+        'Set-Cookie': sessions.cookieHeader(user.id, { secure, userEpoch: user.sessionEpoch || 0 }),
         'Cache-Control': 'no-store',
       });
       return res.end();
@@ -696,6 +698,52 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { items: users.list() });
     }
 
+    if (route === 'admin/sessions/revoke-all' && method === 'POST') {
+      requireRole('admin');
+      const globalEpoch = sessions.revokeAll();
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'session.revoke_all',
+        target: '*',
+        meta: { globalEpoch },
+        ip,
+      });
+      return sendJson(res, 200, { ok: true, globalEpoch });
+    }
+
+    if (route.startsWith('admin/users/') && method === 'PATCH') {
+      requireRole('admin');
+      const userId = route.slice('admin/users/'.length);
+      const body = await readBody(req);
+      if (!body || typeof body.disabled !== 'boolean') throw badRequest('需要 disabled 布尔值');
+      const updated = users.setDisabled(userId, body.disabled);
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: body.disabled ? 'user.disable' : 'user.enable',
+        target: updated.name,
+        meta: { sessionEpoch: updated.sessionEpoch },
+        ip,
+      });
+      return sendJson(res, 200, { ok: true, user: updated });
+    }
+
+    if (route.startsWith('admin/users/') && route.endsWith('/revoke-sessions') && method === 'POST') {
+      requireRole('admin');
+      const userId = route.slice('admin/users/'.length, -'/revoke-sessions'.length);
+      const updated = users.bumpSessionEpoch(userId);
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'session.revoke_user',
+        target: updated.name,
+        meta: { sessionEpoch: updated.sessionEpoch },
+        ip,
+      });
+      return sendJson(res, 200, { ok: true, user: updated });
+    }
+
     if (route === 'admin/tokens' && method === 'POST') {
       requireRole('admin');
       const body = await readBody(req);
@@ -786,7 +834,7 @@ export function createApp(config = loadConfig()) {
     }
   });
 
-  return { server, config, users, audit, store, transparency };
+  return { server, config, users, audit, store, transparency, sessions };
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */
