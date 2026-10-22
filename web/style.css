@@ -651,9 +651,48 @@ pre.code {
 
 .finding {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel, rgba(255, 255, 255, 0.02));
+}
+
+.finding-head {
+  display: flex;
   gap: 8px;
   align-items: baseline;
   flex-wrap: wrap;
+}
+
+.finding .snippet {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(147, 161, 187, 0.08);
+  border-radius: 6px;
+  padding: 4px 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-note {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.review-findings {
+  width: 100%;
+  padding: 8px 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.btn.has-findings {
+  color: var(--amber);
+  font-weight: 600;
 }
 
 .finding .sev {
@@ -1081,4 +1120,63 @@ pre.code {
   display: flex;
   gap: 6px;
   margin-left: auto;
+}
+
+/* 待审核：按扫描风险分组 */
+.review-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.review-group .group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+
+.review-item {
+  border-left: 3px solid transparent;
+}
+
+.review-item.risk-high {
+  border-left-color: var(--red);
+}
+
+.review-item.risk-medium {
+  border-left-color: var(--amber);
+}
+
+.review-item.risk-low {
+  border-left-color: var(--primary);
+}
+
+.review-item.risk-clean {
+  border-left-color: var(--green);
+}
+
+.chip.risk-high {
+  color: #ff8a8a;
+  border-color: rgba(255, 107, 107, 0.45);
+  background: rgba(255, 107, 107, 0.1);
+}
+
+.chip.risk-medium {
+  color: #ffc873;
+  border-color: rgba(255, 184, 77, 0.45);
+  background: rgba(255, 184, 77, 0.1);
+}
+
+.chip.risk-low {
+  color: #8ab6ff;
+  border-color: rgba(79, 140, 255, 0.45);
+  background: rgba(79, 140, 255, 0.1);
+}
+
+.chip.risk-clean {
+  color: #7ee8b8;
+  border-color: rgba(61, 220, 151, 0.45);
+  background: rgba(61, 220, 151, 0.1);
 }

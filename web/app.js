@@ -22,6 +22,8 @@ const state = {
   kind: '',
   detail: null,
   reviewCount: 0,
+  reviewKind: '',
+  reviewRisk: 'all',
   auditTenant: '',
   page: 1,
 };
@@ -90,6 +92,59 @@ function scanChips(scan) {
   if (medium > 0) chips.push(h('span', { class: 'chip' }, `中危 ${medium}`));
   if (low > 0) chips.push(h('span', { class: 'chip' }, `低危 ${low}`));
   return chips;
+}
+
+const RULE_GROUPS = {
+  PI: '提示注入',
+  EX: '数据外发',
+  SEC: '密钥泄漏',
+  SH: '危险命令',
+  EXEC: '动态执行',
+  PER: '持久化/配置篡改',
+  HID: '隐藏内容',
+  NET: '环境密钥',
+  MET: '结构检查',
+  BIN: '二进制',
+  SUP: '供应链',
+};
+
+function ruleGroup(ruleId) {
+  return RULE_GROUPS[String(ruleId || '').split('-')[0]] || '其他';
+}
+
+const SEV_ORDER = { high: 0, medium: 1, low: 2 };
+
+/** 扫描发现列表（按严重度排序，含规则组与命中片段）；详情页与审核队列共用 */
+function findingsList(scan) {
+  const findings = [...(scan?.findings || [])].sort((a, b) => (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9));
+  if (findings.length === 0) return [h('span', { class: 'muted' }, '未发现问题')];
+  return findings.map((finding) =>
+    h(
+      'div',
+      { class: 'finding' },
+      h(
+        'div',
+        { class: 'finding-head' },
+        h('span', { class: `sev ${finding.severity}` }, finding.severity),
+        h('span', { class: 'mono' }, finding.ruleId),
+        h('span', { class: 'tag' }, ruleGroup(finding.ruleId)),
+        h('span', {}, finding.title),
+        h('span', { class: 'muted' }, `${finding.file}${finding.line ? `#L${finding.line}` : ''}`),
+      ),
+      finding.snippet ? h('div', { class: 'snippet mono' }, finding.snippet) : null,
+    ),
+  );
+}
+
+/** 增量扫描说明（SUP-002：与哪个基准版本比对） */
+function diffNote(scan, onOpenDiff) {
+  if (!scan?.diff?.base) return null;
+  return h(
+    'div',
+    { class: 'diff-note' },
+    h('span', { class: 'chip' }, `增量扫描 · 对比 ${scan.diff.base}`),
+    onOpenDiff ? h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: onOpenDiff }, '查看差异') : null,
+  );
 }
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -898,22 +953,8 @@ function paintDetail() {
         'div',
         { class: 'panel' },
         h('h3', {}, '安全扫描'),
-        h(
-          'div',
-          { class: 'findings' },
-          ...(selected.scan.findings.length > 0
-            ? selected.scan.findings.map((finding) =>
-                h(
-                  'div',
-                  { class: 'finding' },
-                  h('span', { class: `sev ${finding.severity}` }, finding.severity),
-                  h('span', { class: 'mono' }, finding.ruleId),
-                  h('span', {}, finding.title),
-                  h('span', { class: 'muted' }, `${finding.file}${finding.line ? `#L${finding.line}` : ''}`),
-                ),
-              )
-            : [h('span', { class: 'muted' }, '未发现问题')]),
-        ),
+        diffNote(selected.scan, () => openDiff(pkg, selected.version)),
+        h('div', { class: 'findings' }, ...findingsList(selected.scan)),
       )
     : null;
 
@@ -1070,11 +1111,38 @@ async function previewFile(pkg, version, filePath) {
 
 /* ------------------------------ 待审核 ------------------------------ */
 
-async function renderReview(main) {
-  const data = await api('/review/queue');
-  const rows = data.items.map((item) => {
-    const note = h('input', { placeholder: '备注（可选）', class: 'mono' });
-    return h(
+const REVIEW_BUCKETS = [
+  { id: 'high', title: '需重点审查（高危）', hint: '命中高危规则，请先展开扫描详情确认' },
+  { id: 'medium', title: '建议关注（中危）', hint: '有中危命中，确认用途与权限后再通过' },
+  { id: 'low', title: '低危提醒', hint: '仅有低危命中，通常可快速通过' },
+  { id: 'clean', title: '扫描干净', hint: '未命中任何规则，可快速通过' },
+];
+
+function riskBucketOf(item) {
+  const summary = item.scanSummary || (item.scan && item.scan.summary) || {};
+  if ((summary.high || 0) > 0) return 'high';
+  if ((summary.medium || 0) > 0) return 'medium';
+  if ((summary.low || 0) > 0) return 'low';
+  return 'clean';
+}
+
+function reviewRow(item) {
+  const note = h('input', { placeholder: '备注（可选）', class: 'mono' });
+  const findings = (item.scan && item.scan.findings) || [];
+  const findingsBox = h('div', { class: 'findings review-findings', hidden: true }, ...findingsList(item.scan));
+  const scanLabel = findings.length ? `扫描 ${findings.length}` : '扫描';
+  const scanToggle = h('button', {
+    class: `btn btn-ghost btn-sm${findings.length ? ' has-findings' : ''}`,
+    type: 'button',
+    onClick: () => {
+      findingsBox.hidden = !findingsBox.hidden;
+      scanToggle.textContent = findingsBox.hidden ? scanLabel : '收起';
+    },
+  }, scanLabel);
+  return h(
+    'div',
+    { class: `review-item risk-${riskBucketOf(item)}` },
+    h(
       'div',
       { class: 'list-row' },
       h(
@@ -1084,9 +1152,10 @@ async function renderReview(main) {
         h('div', { class: 'muted' }, `${item.manifestDescription || item.description || ''}`),
         h('div', { class: 'muted' }, `提交：${item.submittedBy} · ${fmtTime(item.submittedAt)} · ${item.fileCount} 文件`),
       ),
+      h('span', { class: `chip ${item.kind}` }, KIND_LABEL[item.kind] || item.kind),
       ...scanChips({ summary: item.scanSummary || { high: 0, medium: 0, low: 0, total: 0 } }),
-      h('span', { class: 'tag' }, `${item.scanSummary?.high || 0} 高危`),
       note,
+      scanToggle,
       h('button', {
         class: 'btn btn-ghost btn-sm',
         type: 'button',
@@ -1126,12 +1195,65 @@ async function renderReview(main) {
           }
         },
       }, '拒绝'),
-    );
+    ),
+    findingsBox,
+  );
+}
+
+async function renderReview(main) {
+  const data = await api('/review/queue');
+  const items = data.items || [];
+  const kindSelect = h('select', {
+    onChange: () => {
+      state.reviewKind = kindSelect.value;
+      render();
+    },
+  }, h('option', { value: '' }, '全部类型'), ...Object.entries(KIND_LABEL).map(([value, label]) => h('option', { value }, label)));
+  kindSelect.value = state.reviewKind;
+  const riskSelect = h('select', {
+    onChange: () => {
+      state.reviewRisk = riskSelect.value;
+      render();
+    },
+  },
+    h('option', { value: 'all' }, '全部风险'),
+    h('option', { value: 'attention' }, '需关注（高/中危）'),
+    h('option', { value: 'clean' }, '扫描干净'));
+  riskSelect.value = state.reviewRisk;
+
+  const filtered = items.filter((item) => {
+    if (state.reviewKind && item.kind !== state.reviewKind) return false;
+    const bucket = riskBucketOf(item);
+    if (state.reviewRisk === 'attention' && bucket !== 'high' && bucket !== 'medium') return false;
+    if (state.reviewRisk === 'clean' && bucket !== 'clean') return false;
+    return true;
   });
 
+  const counts = { high: 0, medium: 0, low: 0, clean: 0 };
+  for (const item of items) counts[riskBucketOf(item)] += 1;
+
+  const groups = REVIEW_BUCKETS.map((bucket) => {
+    const bucketItems = filtered.filter((item) => riskBucketOf(item) === bucket.id);
+    if (bucketItems.length === 0) return null;
+    return h('section', { class: 'review-group' },
+      h('div', { class: 'group-title' },
+        h('span', { class: `chip risk-${bucket.id}` }, `${bucket.title} ${bucketItems.length}`),
+        h('span', { class: 'muted' }, bucket.hint)),
+      h('div', { class: 'list' }, ...bucketItems.map(reviewRow)));
+  }).filter(Boolean);
+
+  const toolbar = h('div', { class: 'toolbar' },
+    ...REVIEW_BUCKETS.map((bucket) => h('span', { class: `chip risk-${bucket.id}` }, `${bucket.title} ${counts[bucket.id]}`)),
+    kindSelect,
+    riskSelect,
+    h('button', { class: 'btn', type: 'button', onClick: () => render() }, '刷新'));
+
   main.replaceChildren(
-    h('div', { class: 'section-title' }, h('h2', {}, '待审核'), h('span', { class: 'muted' }, `共 ${data.total} 个版本`)),
-    rows.length ? h('div', { class: 'list' }, ...rows) : h('div', { class: 'empty' }, '没有待审核的版本'),
+    h('div', { class: 'section-title' },
+      h('h2', {}, '待审核'),
+      h('span', { class: 'muted' }, `共 ${data.total} 个版本 · 按扫描结果分组`)),
+    toolbar,
+    groups.length ? h('div', { class: 'review-groups' }, ...groups) : h('div', { class: 'empty' }, items.length ? '当前筛选下没有版本' : '没有待审核的版本'),
   );
 }
 
