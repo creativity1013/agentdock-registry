@@ -518,41 +518,78 @@ export function createStore(config, { audit, users, transparency } = {}) {
     };
   }
 
-  /** 市场列表 */
+  /** 市场列表：SQLite 后端下推到 SQL，JSON 后端在内存过滤 */
   function listPackages({ q = '', kind = '', status = 'published', includePending = false } = {}) {
     const query = String(q || '').trim().toLowerCase();
     const items = [];
-    for (const [pkgKey, pkg] of Object.entries(db.packages)) {
-      if (kind && pkg.kind !== kind) continue;
-      const visible = Object.values(pkg.versions).filter(
-        (item) => includePending || item.status === 'published',
-      );
-      const matching = status ? visible.filter((item) => item.status === status) : visible;
-      if (matching.length === 0) continue;
-      const latest = matching.sort((a, b) => compareVersions(a.version, b.version))[matching.length - 1];
-      const haystack = `${pkg.name} ${pkg.description || ''} ${(pkg.tags || []).join(' ')}`.toLowerCase();
-      if (query && !haystack.includes(query)) continue;
-      items.push({
-        key: pkgKey,
-        kind: pkg.kind,
-        kindLabel: KIND_LABEL[pkg.kind],
-        name: pkg.name,
-        description: latest.description || pkg.description,
-        tags: latest.tags || pkg.tags || [],
-        latestVersion: latest.version,
-        status: latest.status,
-        updatedAt: latest.submittedAt,
-        submittedBy: latest.submittedBy,
-        installs: totalInstalls(pkg),
-        versionsCount: matching.length,
-        fileCount: latest.fileCount,
-        totalBytes: latest.totalBytes,
-        manifest: latest.manifest,
-        scanSummary: latest.scan?.summary ?? null,
-      });
+    if (typeof backend.queryPackages === 'function') {
+      const rows = backend.queryPackages({ q: query, kind, status, includePending });
+      const grouped = new Map();
+      for (const row of rows) {
+        const pkgKey = `${row.kind}/${row.name}`;
+        if (!grouped.has(pkgKey)) {
+          grouped.set(pkgKey, {
+            kind: row.kind,
+            name: row.name,
+            description: row.description,
+            tags: safeJsonArray(row.tags),
+            versions: {},
+          });
+        }
+        if (row.payload) grouped.get(pkgKey).versions[row.version] = row.payload;
+      }
+      for (const [pkgKey, pkg] of grouped) {
+        const item = listItemFor(pkgKey, pkg, { query, kind, status, includePending });
+        if (item) items.push(item);
+      }
+    } else {
+      for (const [pkgKey, pkg] of Object.entries(db.packages)) {
+        const item = listItemFor(pkgKey, pkg, { query, kind, status, includePending });
+        if (item) items.push(item);
+      }
     }
     items.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     return { total: items.length, items };
+  }
+
+  /** 把单个包裁剪成市场列表项（两种后端共用） */
+  function listItemFor(pkgKey, pkg, { query, kind, status, includePending }) {
+    if (kind && pkg.kind !== kind) return null;
+    const visible = Object.values(pkg.versions).filter(
+      (item) => includePending || item.status === 'published',
+    );
+    const matching = status ? visible.filter((item) => item.status === status) : visible;
+    if (matching.length === 0) return null;
+    const latest = matching.sort((a, b) => compareVersions(a.version, b.version))[matching.length - 1];
+    const haystack = `${pkg.name} ${pkg.description || ''} ${(pkg.tags || []).join(' ')}`.toLowerCase();
+    if (query && !haystack.includes(query)) return null;
+    return {
+      key: pkgKey,
+      kind: pkg.kind,
+      kindLabel: KIND_LABEL[pkg.kind],
+      name: pkg.name,
+      description: latest.description || pkg.description,
+      tags: latest.tags || pkg.tags || [],
+      latestVersion: latest.version,
+      status: latest.status,
+      updatedAt: latest.submittedAt,
+      submittedBy: latest.submittedBy,
+      installs: totalInstalls(pkg),
+      versionsCount: matching.length,
+      fileCount: latest.fileCount,
+      totalBytes: latest.totalBytes,
+      manifest: latest.manifest,
+      scanSummary: latest.scan?.summary ?? null,
+    };
+  }
+
+  function safeJsonArray(value) {
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
 
   /** 包详情（版本列表按需过滤 pending） */
@@ -625,6 +662,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   function stats() {
+    if (typeof backend.queryStats === 'function') return backend.queryStats();
     const result = {
       packages: 0,
       versions: 0,

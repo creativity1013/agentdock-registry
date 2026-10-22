@@ -112,3 +112,56 @@ test('后端选择：默认 json，AGENTDOCK_STORE=sqlite 生效，非法值报�
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('sqlite 后端：市场列表/搜索/统计由 SQL 下推，结果与 JSON 后端一致', { skip }, () => {
+  const root = makeRoot();
+  const buildPayload = (name, version = '0.1.0') => ({
+    ...skillPayload(),
+    name,
+    version,
+    files: [
+      {
+        path: 'SKILL.md',
+        encoding: 'utf8',
+        content: `---\nname: ${name}\ndescription: 演示用技能\n---\n\n# ${name}\n`,
+      },
+    ],
+  });
+  const seed = (store) => {
+    store.publish(buildPayload('demo-alpha'), { actor: 'alice' });
+    store.publish(buildPayload('demo-beta'), { actor: 'alice' });
+    store.review('skill', 'demo-alpha', '0.1.0', { decision: 'approve', actor: 'rev', role: 'reviewer' });
+    store.recordInstall('skill', 'demo-alpha', '0.1.0', { actor: 'bob' });
+  };
+  try {
+    const sqlConfig = makeConfig(root, { store: { backend: 'sqlite' } });
+    const sqlStore = createStore(sqlConfig);
+    seed(sqlStore);
+
+    const jsonRoot = path.join(root, 'json-home');
+    fs.mkdirSync(jsonRoot, { recursive: true });
+    const jsonConfig = makeConfig(jsonRoot);
+    const jsonStore = createStore(jsonConfig);
+    seed(jsonStore);
+
+    for (const options of [
+      {},
+      { q: 'beta' },
+      { kind: 'skill' },
+      { status: 'pending' },
+      { status: 'published', includePending: true },
+      { status: '' },
+    ]) {
+      const normalize = (items) => items.map(({ updatedAt, ...rest }) => rest);
+      const pushed = sqlStore.listPackages(options);
+      const inMemory = jsonStore.listPackages(options);
+      assert.deepEqual(normalize(pushed.items), normalize(inMemory.items), `listPackages(${JSON.stringify(options)}) 不一致`);
+      assert.equal(pushed.total, inMemory.total);
+    }
+    assert.deepEqual(sqlStore.stats(), jsonStore.stats());
+    sqlStore.close();
+    jsonStore.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

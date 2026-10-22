@@ -466,6 +466,7 @@ AGENTDOCK_STORE=sqlite npm start
 - 使用 Node 24+ 内置 `node:sqlite`（仍标记 experimental，启动会打印一条 ExperimentalWarning），Docker 镜像已是 node:24-alpine；Node 20/22 上不可用。
 - 关系表 `packages` / `versions` 存可查询的键（kind/name/version/status）与完整版本 JSON payload；包内容仍落盘在 `data/packages/...`，与 JSON 后端一致。
 - 开启 WAL、按包/按版本增量写（不再每次重写整个索引）。
+- **列表/搜索/统计下推到 SQL**：市场列表的 kind/status/关键词过滤与统计计数走 `queryPackages` / `queryStats`，不再遍历全量 JSON；版本排序仍用 JS 比较 semver（避免字符串排序把 `0.10.0` 排到 `0.9.0` 前）。
 - 首次以 sqlite 启动时，如果存在旧的 `db.json` 且 sqlite 为空，会自动迁移（记录 `meta.migrated_from=db.json`，原文件保留，可回退）。
 - 备份：`data/` 目录（含 `agentdock.sqlite` 及其 `-wal`/`-shm`）整体备份；SQLite 模式下建议停服或用 `sqlite3 .backup`。
 - 测试：`npm run test:sqlite`、`npm run smoke:sqlite`（CI 在 Node 24 矩阵上执行）。

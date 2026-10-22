@@ -439,7 +439,8 @@ load() -> state | savePackage(pkgKey, pkg) | saveVersion(pkgKey, versionDoc) | c
 - **sqlite**（`AGENTDOCK_STORE=sqlite`）：`node:sqlite` 的 `DatabaseSync`，WAL 模式；表 `packages(kind,name,description,tags,created_at,created_by,updated_at)` 与 `versions(kind,name,version,status,payload JSON)`，`status` 建索引。包内容仍是 `data/packages/<kind>/<name>/<version>/files/`（两种后端一致，安装/下载/验签逻辑不变）。
 - **迁移**：以 sqlite 启动且表为空、同时存在 `db.json` 时，自动把包与版本导入 SQLite 并写 `meta.migrated_from=db.json`；原 `db.json` 保留以便回退。
 - **写入粒度**：发布写整包（含版本）、审核/安装写单版本，不再整库重写；`server.on('close')` 会 `store.close()` 释放 SQLite 句柄并 checkpoint。
-- **取舍**：仍然在启动时把全部元数据读入内存（列表/搜索走内存），SQLite 解决的是持久化可靠性、写入成本与规模上限；若要百万级包再考虑把列表/搜索下推 SQL 或换外部数据库。`node:sqlite` 在 Node 24 仍标记 experimental（启动有警告），因此默认后端保持 json，CI 在 Node 24 上单独验证 sqlite。
+- **列表/搜索/统计下推**：SQLite 模式下列表用 `queryPackages()`（SQL 过滤 kind/status/关键词）、统计用 `queryStats()`（SQL 聚合），`store.listPackages/stats` 优先走这些方法；版本 semver 排序与分页仍在 JS 完成。JSON 后端保持原内存实现，两条路径有对照测试保证语义一致。
+- **取舍**：启动时仍把全部元数据读入内存（详情、写入、审核需要随机访问）；SQLite 解决持久化可靠性、写入成本与规模上限，列表/搜索已下推。若要百万级包再考虑详情/审核也改为按需查询或换外部数据库。`node:sqlite` 在 Node 24 仍标记 experimental（启动有警告），因此默认后端保持 json，CI 在 Node 24 上单独验证 sqlite。
 
 ## 13. 部署形态
 

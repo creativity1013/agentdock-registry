@@ -265,5 +265,62 @@ export function createSqliteBackend(config) {
     };
   }
 
-  return { kind: SQLITE_BACKEND, file, load, savePackage, saveVersion, close, info };
+  /** 列表查询下推：过滤在 SQL 完成，版本 semver 排序在调用方用 JS 处理 */
+  function queryPackages({ q = '', kind = '', status = 'published', includePending = false } = {}) {
+    const clauses = [];
+    const params = [];
+    if (kind) {
+      clauses.push('p.kind = ?');
+      params.push(kind);
+    }
+    if (status) {
+      clauses.push('v.status = ?');
+      params.push(status);
+    } else if (!includePending) {
+      clauses.push("v.status = 'published'");
+    } else {
+      clauses.push("v.status <> 'rejected'");
+    }
+    const query = String(q || '').trim().toLowerCase();
+    if (query) {
+      clauses.push(
+        "lower(p.name || ' ' || coalesce(p.description, '') || ' ' || coalesce(p.tags, '[]')) LIKE ?",
+      );
+      params.push(`%${query}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = db
+      .prepare(
+        `SELECT p.kind, p.name, p.description, p.tags, v.version, v.status, v.payload
+           FROM packages p
+           JOIN versions v ON v.kind = p.kind AND v.name = p.name
+           ${where}
+           ORDER BY p.kind, p.name`,
+      )
+      .all(...params);
+    return rows.map((row) => ({ ...row, payload: JSON.parse(row.payload) }));
+  }
+
+  /** 统计下推：计数与安装量由 SQL 聚合 */
+  function queryStats() {
+    const count = (sql, ...params) => Number(db.prepare(sql).get(...params).n || 0);
+    const result = {
+      packages: count('SELECT COUNT(*) AS n FROM packages'),
+      versions: count('SELECT COUNT(*) AS n FROM versions'),
+      pending: 0,
+      published: 0,
+      rejected: 0,
+      installs: count("SELECT COALESCE(SUM(json_extract(payload, '$.installs')), 0) AS n FROM versions"),
+      byKind: { skill: 0, agent: 0, plugin: 0 },
+    };
+    for (const row of db.prepare('SELECT status, COUNT(*) AS n FROM versions GROUP BY status').all()) {
+      result[row.status] = (result[row.status] || 0) + Number(row.n);
+    }
+    for (const row of db.prepare('SELECT kind, COUNT(*) AS n FROM packages GROUP BY kind').all()) {
+      result.byKind[row.kind] = (result.byKind[row.kind] || 0) + Number(row.n);
+    }
+    return result;
+  }
+
+  return { kind: SQLITE_BACKEND, file, load, savePackage, saveVersion, close, info, queryPackages, queryStats };
 }
