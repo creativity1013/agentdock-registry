@@ -171,6 +171,17 @@ async function main() {
   assert(transparencyProof.includes('本地校验：✓ 通过'), `透明日志包含证明校验失败：${transparencyProof}`);
   console.log('✓ 发布者签名 + 透明日志：keygen / 注册 / 签名发布 / 链校验 / 包含证明均正常');
 
+  // 外部 registry：适配器信息 + 中立市场目录导出
+  const syncSources = await runCli(['sync', 'sources'], tokens.publisher);
+  assert(syncSources.includes('GitHub 仓库') && syncSources.includes('MCP registry'), 'sync sources 输出异常');
+  const exportFile = path.join(home, 'marketplace.json');
+  const syncExport = await runCli(['sync', 'export', '--out', exportFile], tokens.publisher);
+  assert(syncExport.includes('已导出市场目录'), `sync export 输出异常：${syncExport}`);
+  const catalog = JSON.parse(fs.readFileSync(exportFile, 'utf8'));
+  assert(catalog.schema === 'agentdock-marketplace@1' && catalog.count >= 3, '导出的市场目录内容异常');
+  assert(catalog.items.every((item) => item.bundleUrl && item.contentHash.length === 64), '市场目录缺少 bundleUrl/contentHash');
+  console.log('✓ 外部 registry：适配器信息与市场目录导出正常');
+
   // 冒烟结果
   const stats = await fetch(`${server.url}/api/v1/stats`).then((response) => response.json());
   console.log('');

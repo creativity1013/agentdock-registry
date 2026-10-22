@@ -11,6 +11,7 @@ import { LIMITS } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
 import { diffBundles } from './diff.mjs';
 import { createTransparencyLog } from './transparency.mjs';
+import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
 
@@ -156,6 +157,96 @@ export function createApp(config = loadConfig()) {
     if (route === 'targets' && method === 'GET') {
       requireAuth();
       return sendJson(res, 200, { items: listTargets({ home: config.home }) });
+    }
+
+    // 外部 registry 互操作：适配器与导出目录
+    if (route === 'registry' && method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true,
+        adapters: describeAdapters(config),
+        exportUrl: `${config.publicUrl}/api/v1/registry/export`,
+        schema: 'agentdock-marketplace@1',
+      });
+    }
+    if (route === 'registry/export' && method === 'GET') {
+      return sendJson(res, 200, buildMarketplaceCatalog(store, { baseUrl: config.publicUrl }));
+    }
+    if (route === 'sync/import' && method === 'POST') {
+      requireRole('publisher');
+      const body = await readBody(req);
+      const source = body && body.source;
+      if (!source || typeof source !== 'object') throw badRequest('需要 source（{type:"github"|"mcp", ...}）');
+      let imported;
+      try {
+        if (source.type === 'github') {
+          imported = await importFromGitHub({
+            repo: source.repo,
+            path: source.path,
+            ref: source.ref,
+            apiBase: config.registries.githubApi,
+            token: config.githubToken,
+          });
+        } else if (source.type === 'mcp') {
+          imported = await importFromMcpRegistry({
+            name: source.name,
+            baseUrl: config.registries.mcpRegistry,
+            version: source.version,
+          });
+        } else {
+          throw badRequest(`不支持的 source.type：${source.type}`);
+        }
+      } catch (error) {
+        if (error instanceof RegistryError) {
+          throw new AppError(error.status || 502, 'REGISTRY_ERROR', error.message, error.details);
+        }
+        throw error;
+      }
+      if (!imported.kind) {
+        throw unprocessable('无法识别能力包类型：需要根目录含 SKILL.md、agent.md 或 plugin.json');
+      }
+      const payload = {
+        kind: imported.kind,
+        name: imported.meta.name,
+        version: body.version || imported.meta.version,
+        description: body.description || imported.meta.description,
+        tags: Array.isArray(body.tags) && body.tags.length ? body.tags : imported.meta.tags,
+        files: imported.files,
+      };
+      const report = store.analyze(payload);
+      if (body.dryRun) {
+        return sendJson(res, 200, {
+          ok: report.valid && !report.blocked,
+          dryRun: true,
+          source: imported.source,
+          kind: payload.kind,
+          name: payload.name,
+          version: payload.version,
+          valid: report.valid,
+          blocked: report.blocked,
+          errors: report.errors,
+          warnings: [...imported.warnings, ...(report.warnings || [])],
+          summary: report.summary,
+          scan: report.scan,
+          verdict: report.verdict,
+        });
+      }
+      const result = store.publish(payload, { actor: auth.name, actorId: auth.id, role: auth.role, ip });
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'sync.import',
+        target: `${payload.kind}/${payload.name}@${payload.version}`,
+        meta: { source: imported.source, warnings: imported.warnings.length },
+        ip,
+      });
+      return sendJson(res, 201, {
+        ok: true,
+        source: imported.source,
+        warnings: [...imported.warnings, ...(report.warnings || [])],
+        package: result.package,
+        version: publicVersion(result.version),
+        message: '已从外部 registry 导入，等待审核',
+      });
     }
 
     if (route === 'verify' && method === 'POST') {

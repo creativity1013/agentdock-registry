@@ -50,6 +50,13 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock transparency [head|verify|entries|proof <kind>/<name>[@version]]
                                                    可验证透明日志：查看头部 / 验链 / 列表 / 版本包含证明
 
+  agentdock sync sources                           查看已配置的外部 registry 适配器
+  agentdock sync import github <owner/repo> [--path 子目录] [--ref 分支] [--version 0.1.0] [--dry-run]
+                                                   从 GitHub 导入 skill/agent/plugin，进入待审核队列
+  agentdock sync import mcp <server-name> [--version 1.0.0] [--dry-run]
+                                                   从 MCP registry 导入 server 为 plugin 能力包
+  agentdock sync export [--out <文件>]             导出中立市场目录（agentdock-marketplace@1）
+
   agentdock review list                            审核队列（需 reviewer 角色）
   agentdock review approve <kind>/<name>@<version> [--note "..."]
   agentdock review reject  <kind>/<name>@<version> [--note "..."]
@@ -676,6 +683,84 @@ async function cmdVerifySignature(positionals, flags) {
   }
 }
 
+async function cmdSync(positionals, flags) {
+  const conn = resolveConnection(flags);
+  const sub = positionals[0];
+
+  if (!sub || sub === 'sources') {
+    const data = await api(conn, 'GET', '/api/v1/registry');
+    if (flags.json) return console.log(JSON.stringify(data, null, 2));
+    console.log('外部 registry 适配器：');
+    for (const adapter of data.adapters) {
+      console.log(`  ${adapter.type.padEnd(8)} ${adapter.label}`);
+      console.log(`           ${adapter.description}`);
+      console.log(`           base：${adapter.baseUrl}${adapter.tokenConfigured ? '（已配置 token）' : ''}`);
+    }
+    console.log(`\n市场目录导出：${data.exportUrl}`);
+    return;
+  }
+
+  if (sub === 'export') {
+    const catalog = await api(conn, 'GET', '/api/v1/registry/export');
+    const text = `${JSON.stringify(catalog, null, 2)}\n`;
+    if (flags.out) {
+      const out = path.resolve(String(flags.out));
+      fs.mkdirSync(path.dirname(out), { recursive: true });
+      fs.writeFileSync(out, text);
+      console.log(`✓ 已导出市场目录：${out}（${catalog.count} 个能力包，digest ${catalog.digest.slice(0, 16)}…）`);
+    } else {
+      process.stdout.write(text);
+    }
+    return;
+  }
+
+  if (sub === 'import') {
+    requireToken(conn);
+    const type = positionals[1];
+    const target = positionals[2];
+    if (!type || !target) {
+      throw new Error('用法：agentdock sync import github <owner/repo> [--path 子目录] 或 sync import mcp <server-name>');
+    }
+    let source;
+    if (type === 'github') {
+      source = { type: 'github', repo: target, path: flags.path || '', ref: flags.ref || '' };
+    } else if (type === 'mcp') {
+      source = { type: 'mcp', name: target, version: flags.version || '' };
+    } else {
+      throw new Error(`不支持的 source 类型：${type}（可选 github / mcp）`);
+    }
+    const body = {
+      source,
+      dryRun: Boolean(flags['dry-run']),
+      ...(flags.version ? { version: String(flags.version) } : {}),
+      ...(flags.description ? { description: String(flags.description) } : {}),
+    };
+    const data = await api(conn, 'POST', '/api/v1/sync/import', body);
+    if (flags.json) return console.log(JSON.stringify(data, null, 2));
+    const formatWarning = (warning) =>
+      typeof warning === 'string' ? warning : warning?.message || JSON.stringify(warning);
+    if (data.dryRun) {
+      const label = `${data.kind}/${data.name}@${data.version}`;
+      const scanSummary = data.scan?.summary || {};
+      console.log(`▸ 导入预检：${label}（source: ${data.source.type}）`);
+      console.log(`  校验：${data.valid ? '通过' : '未通过'}  扫描：高 ${scanSummary.high ?? 0} / 中 ${scanSummary.medium ?? 0} / 低 ${scanSummary.low ?? 0}`);
+      for (const warning of data.warnings || []) console.log(`  ! ${formatWarning(warning)}`);
+      if (!data.ok) {
+        for (const error of data.errors || []) console.log(`  ✗ ${error.field}：${error.message}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+    const label = `${data.package.kind}/${data.package.name}@${data.version.version}`;
+    console.log(`✓ 已从 ${data.source.type} registry 导入 ${label}，等待审核`);
+    for (const warning of data.warnings || []) console.log(`  ! ${formatWarning(warning)}`);
+    console.log(`  下一步：agentdock review approve ${data.package.kind}/${data.package.name}@${data.version.version}`);
+    return;
+  }
+
+  throw new Error('用法：agentdock sync sources | import github|mcp <目标> | export [--out 文件]');
+}
+
 async function cmdReview(positionals, flags) {
   const conn = resolveConnection(flags);
   requireToken(conn);
@@ -884,6 +969,8 @@ async function main() {
       return cmdRegisterKey(flags);
     case 'transparency':
       return cmdTransparency(positionals, flags);
+    case 'sync':
+      return cmdSync(positionals, flags);
     case 'tokens':
       return cmdTokens(positionals, flags);
     case 'import-claude':

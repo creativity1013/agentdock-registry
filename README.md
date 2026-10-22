@@ -96,6 +96,13 @@ agentdock register-key --key ~/.agentdock/keys/alice-public.pem --name alice
 agentdock publish ./my-skill --key ~/.agentdock/keys/alice-private.pem --key-name alice
 agentdock transparency verify                           # 校验透明日志哈希链
 agentdock transparency proof skill/my-skill@0.1.0       # 版本包含证明（本地校验 Merkle）
+
+# 外部 registry 同步（GitHub / MCP registry）
+agentdock sync sources
+agentdock sync import github acme/skills --path skills/review --dry-run
+agentdock sync import github acme/skills --path skills/review
+agentdock sync import mcp weather
+agentdock sync export --out marketplace.json            # 中立市场目录（agentdock-marketplace@1）
 ```
 
 | 命令 | 说明 |
@@ -116,6 +123,10 @@ agentdock transparency proof skill/my-skill@0.1.0       # 版本包含证明（�
 | `transparency [head\|verify\|entries\|proof <kind/name[@version]>]` | 可验证透明日志：头部 / 验链 / 列表 / 版本 Merkle 包含证明（本地校验） |
 | `tokens create\|list` | 令牌管理（需 admin） |
 | `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
+| `sync sources` | 查看已配置的外部 registry 适配器（GitHub / MCP registry） |
+| `sync import github <owner/repo>` | 从 GitHub 目录导入 skill/agent/plugin（`--path --ref --version --dry-run`），进入待审核 |
+| `sync import mcp <server-name>` | 从 MCP registry 导入 server，转换为带 `mcp` 声明的 plugin 能力包 |
+| `sync export [--out <文件>]` | 导出中立市场目录（`agentdock-marketplace@1`，含 bundleUrl/内容哈希/签名摘要） |
 
 ## 三个概念
 
@@ -272,6 +283,9 @@ my-plugin/
 | GET | `/transparency/entries?limit=&offset=` | 公开 | 透明日志事件（最新在前） |
 | GET | `/transparency/verify` | 公开 | 校验整条哈希链（篡改返回 409） |
 | GET | `/transparency/proof?kind=&name=&version=` | 公开（pending 需审核权限） | 版本在 Merkle 树中的包含证明 |
+| GET | `/registry` | 公开 | 外部 registry 适配器信息与导出地址 |
+| GET | `/registry/export` | 公开 | 中立市场目录（`agentdock-marketplace@1`：bundleUrl、contentHash、签名摘要、digest） |
+| POST | `/sync/import` | publisher | 从外部 registry 导入 `{source:{type:"github",repo,path,ref}}` 或 `{source:{type:"mcp",name}}`；`dryRun:true` 只预检 |
 | GET | `/audit` | reviewer | 审计日志（`limit/offset/action`） |
 | GET | `/admin/users` | admin | 用户列表 |
 | POST | `/admin/tokens` | admin | 创建令牌 `{name,role}` |
@@ -307,6 +321,9 @@ my-plugin/
 | `AGENTDOCK_URL` | `http://127.0.0.1:7788` | CLI 连接地址 |
 | `AGENTDOCK_TOKEN` | — | CLI 令牌 |
 | `AGENTDOCK_DEV` | — | 设为 `1` 开启调试日志 |
+| `AGENTDOCK_GITHUB_API` | `https://api.github.com` | 外部同步使用的 GitHub API 基地址（可指向内网镜像） |
+| `AGENTDOCK_MCP_REGISTRY` | `https://registry.modelcontextprotocol.io` | 外部同步使用的 MCP registry 基地址 |
+| `GITHUB_TOKEN` | — | 可选，提高 GitHub API 速率上限并访问私有仓库 |
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
@@ -329,6 +346,29 @@ agentdock import-claude --presets-dir ./presets      # 片段写到自定义目�
 ```
 
 生成的片段可直接用 DSH 验证：`DSH_HOME=/tmp/dshhome dsh <profile> --patch <片段> --dump-config`。`name` 重复的 md 会被跳过并提示，避免多个文件映射到同一个 preset id。DSH 目前没有 `~/.claude/agents` 原生目录支持：安装到 `claude` 目标即还原为 Claude Code 可识别的 md；要在 DSH 中使用，用 `--target dsh-agent` 或 `import-claude --presets` 生成 preset 片段（原理见 `docs/ARCHITECTURE.md` 的「与 DSH 集成」）。
+
+## 外部 registry 同步（GitHub / MCP registry）
+
+导入语义是 **pull → 统一流水线 → 待审核**：外部内容不会被直接信任，而是先经过本地 normalize → 结构校验 → 安全扫描，再作为 `pending` 版本进入审核队列。审核通过后与本地发布的能力包完全同权（平台签名、透明日志、安装、导出均可用）。
+
+```bash
+agentdock sync sources                                    # 查看适配器与配置的 base URL
+agentdock sync import github acme/skills --path skills/review --dry-run
+agentdock sync import github acme/skills --path skills/review   # → 待审核
+agentdock sync import mcp weather                          # MCP server → plugin 包
+agentdock review approve skill/review@0.1.0
+agentdock sync export --out marketplace.json               # 中立市场目录
+```
+
+转换规则：
+
+- **GitHub**：读取仓库中指定目录（或单文件）的内容，目录相对路径即包内路径；隐藏文件、`node_modules`/`dist` 等目录会被跳过。根目录含 `SKILL.md` / `agent.md` / `plugin.json` 分别识别为三种 kind；名称/版本/描述优先取 frontmatter 或 `plugin.json`。
+- **MCP registry**：server 的 `remotes[].url` 与 `packages[].identifier` 转换为 `plugin.json` 的 `mcp[]` 声明（`url` / `command`），原始 server 元数据保留为 `registry-source.json` 供追溯。
+- **skills.sh**：技能本体就是标准 `SKILL.md`，可直接用 GitHub 导入其对应仓库目录；平台不伪造非公开 API。
+
+安全边界（避免把服务变成 SSRF 跳板）：外部 base URL 只能来自服务端环境变量 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY`，请求体只接受 `repo` / `path` / `ref` / `name` 等标识符，不接受任意 URL；单次导入限制 200 文件、单文件 512KB、总量 2MB，网络请求 15s 超时；导入需要 publisher 权限，并写审计 `sync.import`。
+
+导出格式（`GET /api/v1/registry/export`）是中立目录 `agentdock-marketplace@1`：每个已发布能力包的最新版本包含 `bundleUrl`、`contentHash`、平台签名与发布者签名摘要，`digest` 为整体哈希；其他 harness 可按需映射到自己的 marketplace 清单。
 
 ## 部署（Docker / CI）
 
@@ -376,6 +416,7 @@ agentdock/
 │   ├── dsh-preset.mjs       # agent 包 → DSH agent-preset 片段（tools 映射、profile 合并）
 │   ├── signing.mjs          # ed25519 内容签名/验签（审核通过即签名，公钥公开）+ 发布者签名
 │   ├── transparency.mjs     # 可验证透明日志（哈希链 + Merkle 树 + 包含证明）
+│   ├── registry.mjs         # 外部 registry 互操作（GitHub / MCP registry 导入 + 市场目录导出）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
 │   ├── config.mjs           # 配置与数据目录
@@ -386,7 +427,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（65 个用例）
+├── tests/                   # node:test 测试（73 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -405,6 +446,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - **零依赖**：只用 Node 标准库（`node:http`、`node:test`、`fetch`），离线环境可直接跑；代价是 YAML 解析器、路由等需要自己维护子集实现。
 - **JSON bundle 而非 multipart/tar/zip**：上传/下载都是普通 JSON，方便 CLI、CI、脚本复用；代价是大包体积略增。
 - **文件系统存储而非数据库**：元数据 `db.json` + 内容按版本落盘，便于备份/审查/手工检查；代价是全量索引常驻内存（适合几千个包规模）。
+- **外部同步只做拉取 + 中立导出**：不对第三方 registry 做写操作（避免各平台 API/鉴权差异与误写风险），导入内容一律走同一条校验/扫描/审核流水线；导出采用 `agentdock-marketplace@1` 中立格式，由其他 harness 映射。
 - **静态市场前端**：原生 JS，无构建步骤；markdown 渲染与 diff 视图都是轻量子集实现（渲染只创建文本节点防 XSS，diff 用 LCS 并对超大输入降级），代价是语法支持有限（不支持表格/脚注等扩展）。
 
 ## 安全模型与已知限制
@@ -417,7 +459,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源。
 - **发布者签名（可选）**：`publish --key` 用发布者自己持有的 ed25519 私钥对载荷 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥发布时自动 TOFU 注册（等价于 `POST /api/v1/me/keys`）。签名覆盖内容哈希，因此可证明「该版本由持有对应私钥的人提交」。
 - **可验证透明日志**：每个版本审核通过时向 `data/transparency.log` 追加一条哈希链事件（contentHash、发布者、平台 keyId、发布者 keyId、审核人），事件哈希按 RFC 6962 风格构造 Merkle 树；任何人可通过 `GET /api/v1/transparency/verify` 校验整条链、通过 `GET .../proof` 获取某个版本的包含证明，并用 CLI `transparency verify|proof` 本地校验。日志 append-only，与平台签名交叉印证上架历史。
-- 市场已支持分页与服务端搜索；当前无 SSO/多租户。
+- 外部 registry 导入受服务端出口白名单限制（见上节），导入内容需审核后才能发布；当前无 SSO/多租户。
 - diff 视图只做行级对比：二进制文件仅标记变化，超大文件（>512KB 或 >2000 行）退化为整文件标记。
 
 ## Roadmap
@@ -427,7 +469,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [x] 内容签名（ed25519）与 `verify-signature` 验签接口
 - [x] 发布者密钥签名 / 可验证透明日志（透明日志记录所有上架事件）
 - [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
-- [ ] 与外部 registry（GitHub / skills.sh / MCP registry）双向同步
+- [x] 外部 registry 互操作：GitHub / MCP registry 导入 + 中立市场目录导出（skills.sh 的 `SKILL.md` 可经 GitHub 导入）
 - [ ] 依赖清单与 SBOM、按策略自动审批
 - [ ] SQLite 存储后端（>1 万包规模）
 

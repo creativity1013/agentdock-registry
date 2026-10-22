@@ -303,6 +303,8 @@ async function renderMarket(main) {
     can('publisher')
       ? h('button', { class: 'btn btn-primary', type: 'button', onClick: () => $('#publish-file').click() }, '导入 JSON 包')
       : null,
+    can('publisher') ? h('button', { class: 'btn', type: 'button', onClick: importFromRegistry }, '从外部导入') : null,
+    h('a', { class: 'btn btn-ghost', href: '/api/v1/registry/export', target: '_blank', rel: 'noreferrer' }, '导出目录'),
   );
 
   const grid = list.items.length
@@ -1072,6 +1074,28 @@ async function onPublishFile(event) {
     refreshBadge();
   } catch (error) {
     toast(`导入失败：${error.message}`, 'error');
+  }
+}
+
+async function importFromRegistry() {
+  const repo = window.prompt('从 GitHub 导入：输入 owner/repo', '');
+  if (!repo || !repo.trim()) return;
+  const subPath = window.prompt('仓库内目录（留空表示仓库根目录；例如 skills/my-skill）', '') || '';
+  try {
+    const result = await api('/sync/import', {
+      method: 'POST',
+      body: { source: { type: 'github', repo: repo.trim(), path: subPath.trim() } },
+    });
+    const warnings = (result.warnings || []).length;
+    toast(
+      `已导入 ${result.package.kind}/${result.package.name}@${result.version.version}${warnings ? `（${warnings} 条告警）` : ''}，等待审核`,
+      'ok',
+    );
+    state.view = 'market';
+    render();
+    refreshBadge();
+  } catch (error) {
+    toast(`外部导入失败：${error.message}`, 'error');
   }
 }
 

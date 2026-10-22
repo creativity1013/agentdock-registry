@@ -209,13 +209,14 @@ data/
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
 | `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
+| `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
 | `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf`）、`tokenFromRequest` |
 | `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
 | `cli/agentdock.mjs` | 命令行、本地校验、导入器 | — |
 
-依赖方向：`cli / server → app → store / targets / pipeline / diff → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
+依赖方向：`cli / server → app → store / targets / pipeline / diff / registry → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
 
 ## 5. 安全模型
 
@@ -228,6 +229,7 @@ data/
 7. **内容签名与完整性**：审核通过即用平台 ed25519 私钥签名（绑定 kind/name/version/contentHash）；公钥公开、可离线验签；验签时重算磁盘内容哈希，可发现发布后对 `packages/` 内容的替换。
 8. **发布者签名（可选）**：发布者用自有 ed25519 私钥对 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥时 TOFU 注册到 `users.json` 的 `keys[]`（等价 `POST /me/keys`）。平台签名证明「审过且未被替换」，发布者签名证明「谁提交的」。
 9. **可验证透明日志**：审核通过时向 `transparency.log` 追加哈希链事件（contentHash、发布者、平台/发布者 keyId、审核人），事件哈希构造 RFC 6962 风格 Merkle 树；`/transparency/verify` 校验整链，`/transparency/proof` 返回包含证明，CLI 使用 `verifyInclusionProof` 本地校验。`audit.log` 面向运维（含 IP/角色），`transparency.log` 面向外部可复核（不含敏感字段）。
+10. **外部 registry 导入**（`registry.mjs`）：只从服务端配置的 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY` 读取，请求体不接受任意 URL（防 SSRF）；单次 200 文件 / 单文件 512KB / 总量 2MB、15s 超时；外部内容一律走同一 normalize → validate → scan 流水线，导入后为 `pending`，必须审核才能上架；导入操作需 publisher 权限并记录审计 `sync.import`。
 
 ## 6. 安装目标模型
 
@@ -308,12 +310,49 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 ## 9. 测试策略
 
-- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
-- **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。
+- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency / registry——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
+- **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。
 
-## 10. 部署形态
+## 10. 外部 registry 同步（导入 / 导出）
+
+**目标**：让 AgentDock 与生态现有 registry 互通，同时保持「外部内容不可信」的前提。
+
+**导入（pull）**：
+
+1. `POST /api/v1/sync/import`（publisher）携带 `source`（`github` 或 `mcp`）；服务端从配置的 base URL 拉取内容（白名单，见安全模型第 10 条）。
+2. `registry.mjs` 的适配器把外部内容转成 `{kind, files}`：GitHub 按目录识别 `SKILL.md` / `agent.md` / `plugin.json`；MCP server 转成带 `mcp[]` 声明的 `plugin` 包（原始元数据留 `registry-source.json`）。
+3. 同一 `analyzeInput` 流水线归一化/校验/扫描；`dryRun:true` 只返回预检报告。
+4. 通过校验后 `store.publish` 落库为 `pending`，进入审核队列；审核通过后获得平台签名与透明日志事件。
+5. 审计记录 `sync.import`（含 source 与告警数）。
+
+**导出（中立目录）**：
+
+`GET /api/v1/registry/export` 输出 `agentdock-marketplace@1`：
+
+```json
+{
+  "schema": "agentdock-marketplace@1",
+  "generatedAt": "…",
+  "baseUrl": "https://dock.example",
+  "count": 1,
+  "items": [{
+    "kind": "skill", "name": "review", "latestVersion": "1.2.0",
+    "contentHash": "…64 hex…",
+    "bundleUrl": "https://dock.example/api/v1/packages/skill/review/versions/1.2.0/bundle",
+    "signature": { "algorithm": "ed25519", "keyId": "…" },
+    "publisherSignature": { "keyId": "…", "keyName": "alice" }
+  }],
+  "digest": "…sha256(JSON(items))…"
+}
+```
+
+导出不带内容本体（只给 `bundleUrl` 与哈希/签名摘要），由订阅方自行拉取并验签；这样平台不需要对外写权限，也不会把第三方 registry 的凭据引入服务端。
+
+**不做双向推送**：向 GitHub / skills.sh / MCP registry 主动发布需要各自平台 API、鉴权与审核政策，风险与维护成本高；当前导出中立目录 + 订阅方拉取已能满足「同步」，后续若需要可基于同一适配器接口扩展 push。
+
+## 11. 部署形态
 
 | 形态 | 入口 | 说明 |
 | --- | --- | --- |

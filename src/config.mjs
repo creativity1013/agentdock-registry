@@ -24,6 +24,20 @@ export function loadConfig(env = process.env, overrides = {}) {
     throw new Error(`AGENTDOCK_PORT 不合法：${port}`);
   }
 
+  const registries = {
+    githubApi: 'https://api.github.com',
+    mcpRegistry: 'https://registry.modelcontextprotocol.io',
+    ...(overrides.registries || {}),
+  };
+  if (!overrides.registries?.githubApi && env.AGENTDOCK_GITHUB_API) {
+    registries.githubApi = String(env.AGENTDOCK_GITHUB_API);
+  }
+  if (!overrides.registries?.mcpRegistry && env.AGENTDOCK_MCP_REGISTRY) {
+    registries.mcpRegistry = String(env.AGENTDOCK_MCP_REGISTRY);
+  }
+  registries.githubApi = registries.githubApi.replace(/\/+$/, '');
+  registries.mcpRegistry = registries.mcpRegistry.replace(/\/+$/, '');
+
   const config = {
     host,
     port,
@@ -34,6 +48,8 @@ export function loadConfig(env = process.env, overrides = {}) {
     scanBlock: overrides.scanBlock ?? env.AGENTDOCK_SCAN_BLOCK ?? 'high',
     dev: overrides.dev ?? env.AGENTDOCK_DEV === '1',
     version: readOwnVersion(),
+    registries,
+    githubToken: overrides.githubToken ?? env.GITHUB_TOKEN ?? '',
     files: {
       db: path.join(dataDir, 'db.json'),
       users: path.join(dataDir, 'users.json'),

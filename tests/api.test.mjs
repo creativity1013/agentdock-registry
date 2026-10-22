@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import http from 'node:http';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { startTestServer, skillPayload } from './helpers.mjs';
@@ -634,4 +636,92 @@ test('发布者签名 + 透明日志：TOFU 注册、验签、包含证明与链
   assert.equal(users.findKey(user.id, keys[0].keyId).keyId, keys[0].keyId);
   assert.equal(users.removeKey(user.id, keys[0].keyId), true);
   assert.equal(users.listKeys(user.id).length, 0);
+});
+
+
+test('外部 registry 同步：GitHub 导入 → 待审核 → 发布 → 市场目录导出', async (t) => {
+  const skillMd = '---\nname: synced-skill\nversion: 0.3.0\ndescription: 从 GitHub 导入的技能\n---\n\n# 同步\n\n先核对来源。\n';
+  const mock = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://mock');
+    const json = (data) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+    if (url.pathname === '/repos/acme/kit/contents/') {
+      return json([
+        { name: 'SKILL.md', path: 'SKILL.md', type: 'file', size: skillMd.length, download_url: `${base}/raw/SKILL.md` },
+        { name: 'README.md', path: 'README.md', type: 'file', size: 6, download_url: `${base}/raw/README.md` },
+      ]);
+    }
+    if (url.pathname === '/raw/SKILL.md') return res.end(skillMd);
+    if (url.pathname === '/raw/README.md') return res.end('# kit\n');
+    res.writeHead(404);
+    res.end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  const base = `http://127.0.0.1:${mock.address().port}`;
+  t.after(() => mock.close());
+
+  const app = await startTestServer({ registries: { githubApi: base } });
+  t.after(() => app.close());
+  const { request, tokens } = app;
+  const publisher = tokens.publisher;
+  const reviewer = tokens.reviewer;
+  const source = { source: { type: 'github', repo: 'acme/kit', path: '' } };
+
+  // 适配器信息与导出端点公开可读
+  const info = await request('GET', '/registry');
+  assert.equal(info.status, 200);
+  assert.equal(info.data.adapters[0].type, 'github');
+  assert.equal(info.data.adapters[0].baseUrl, base);
+  assert.equal(info.data.schema, 'agentdock-marketplace@1');
+
+  // 未认证不能导入
+  const anonymous = await request('POST', '/sync/import', { body: source });
+  assert.equal(anonymous.status, 401);
+
+  // dry-run 只预检，不落库
+  const dry = await request('POST', '/sync/import', { token: publisher, body: { ...source, dryRun: true } });
+  assert.equal(dry.status, 200, JSON.stringify(dry.data));
+  assert.equal(dry.data.ok, true);
+  assert.equal(dry.data.kind, 'skill');
+  assert.equal(dry.data.name, 'synced-skill');
+  assert.equal(dry.data.version, '0.3.0');
+
+  // 真实导入 → 待审核
+  const imported = await request('POST', '/sync/import', { token: publisher, body: source });
+  assert.equal(imported.status, 201, JSON.stringify(imported.data));
+  assert.equal(imported.data.package.kind, 'skill');
+  assert.equal(imported.data.package.name, 'synced-skill');
+  assert.equal(imported.data.version.status, 'pending');
+
+  const anonDetail = await request('GET', '/packages/skill/synced-skill');
+  assert.equal(anonDetail.status, 200);
+  assert.equal(anonDetail.data.versions.length, 0);
+  const reviewQueue = await request('GET', '/review/queue', { token: reviewer });
+  assert.ok(reviewQueue.data.items.some((item) => item.name === 'synced-skill' && item.version === '0.3.0'));
+
+  // 审核通过 → 已发布
+  const approved = await request('POST', '/review', {
+    token: reviewer,
+    body: { kind: 'skill', name: 'synced-skill', version: '0.3.0', decision: 'approve', note: 'LGTM' },
+  });
+  assert.equal(approved.status, 200);
+
+  // 市场目录导出包含发布版本、bundleUrl 与签名摘要
+  const exported = await request('GET', '/registry/export');
+  assert.equal(exported.status, 200);
+  assert.equal(exported.data.schema, 'agentdock-marketplace@1');
+  const entry = exported.data.items.find((item) => item.kind === 'skill' && item.name === 'synced-skill');
+  assert.ok(entry, '导出的目录应包含 synced-skill');
+  assert.equal(entry.latestVersion, '0.3.0');
+  assert.match(entry.bundleUrl, /\/api\/v1\/packages\/skill\/synced-skill\/versions\/0\.3\.0\/bundle$/);
+  assert.equal(entry.contentHash.length, 64);
+  assert.ok(entry.signature && entry.signature.keyId);
+  assert.equal(exported.data.digest.length, 64);
+
+  // 审计记录 sync.import
+  const auditLog = await request('GET', '/audit?limit=100', { token: reviewer });
+  assert.ok(auditLog.data.items.some((item) => item.action === 'sync.import' && item.target.includes('synced-skill')));
 });

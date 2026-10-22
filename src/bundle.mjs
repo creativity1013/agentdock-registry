@@ -204,7 +204,7 @@ export function publicFileList(bundle) {
   return bundle.manifestFiles.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256 }));
 }
 
-function isProbablyText(buf) {
+export function isProbablyText(buf) {
   if (buf.includes(0)) return false;
   try {
     new TextDecoder('utf-8', { fatal: true }).decode(buf);
