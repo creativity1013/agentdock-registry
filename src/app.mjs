@@ -15,7 +15,7 @@ import { diffBundles } from './diff.mjs';
 import { qualityOf } from './quality.mjs';
 import { createTransparencyLog } from './transparency.mjs';
 import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
-import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, PolicyError } from './policy.mjs';
+import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, setPolicyFor, PolicyError } from './policy.mjs';
 import { createSessionManager } from './session.mjs';
 import { createOidcClient } from './oidc.mjs';
 
@@ -52,7 +52,7 @@ export function createApp(config = loadConfig()) {
   const transparency = createTransparencyLog(config);
   const store = createStore(config, { audit, users, transparency });
   const policyState = loadPolicy(config);
-  store.setPolicy(policyState.policy);
+  store.setPolicies(policyState.policies);
   const rateLimit = config.security?.rateLimit || { enabled: false };
   const apiLimiter = createRateLimiter({ windowMs: rateLimit.windowMs || 60_000, max: rateLimit.max || 300 });
   const loginLimiter = createRateLimiter({ windowMs: rateLimit.windowMs || 60_000, max: rateLimit.loginMax || 20 });
@@ -630,27 +630,37 @@ export function createApp(config = loadConfig()) {
     // 自动审批策略（读取 reviewer；更新 admin）
     if (route === 'policy' && method === 'GET') {
       requireRole('reviewer');
-      return sendJson(res, 200, { ok: true, policy: store.getPolicy(), source: policyState.source, file: policyState.file });
+      const tenantOverride = Boolean(policyState.policies.tenants[ctx.tenant]);
+      return sendJson(res, 200, {
+        ok: true,
+        tenant: ctx.tenant,
+        policy: store.getPolicy(ctx.tenant),
+        source: policyState.source === 'default' ? 'default' : tenantOverride ? 'tenant' : 'default-tenant',
+        file: policyState.file,
+      });
     }
 
     if (route === 'policy' && method === 'PUT') {
       requireRole('admin');
       const body = await readBody(req);
       const input = body?.policy ?? body;
-      const next = normalizePolicy(input, store.getPolicy());
+      const next = normalizePolicy(input, store.getPolicy(ctx.tenant));
       next.updatedAt = new Date().toISOString();
       next.updatedBy = auth.name;
-      savePolicy(config, next);
-      store.setPolicy(next);
+      const nextPolicies = setPolicyFor(policyState.policies, ctx.tenant, next);
+      savePolicy(config, nextPolicies);
+      policyState.policies = nextPolicies;
+      policyState.source = 'file';
+      store.setPolicies(nextPolicies);
       audit.append({
         actor: auth.name,
         role: auth.role,
         action: 'policy.update',
         target: 'policy.json',
-        meta: { autoApprove: next.autoApprove },
+        meta: { tenant: ctx.tenant, autoApprove: next.autoApprove, quota: next.quota },
         ip,
       });
-      return sendJson(res, 200, { ok: true, policy: next, message: '策略已更新' });
+      return sendJson(res, 200, { ok: true, tenant: ctx.tenant, policy: next, message: '策略已更新' });
     }
 
     // 审计日志（哈希链 + 多维过滤）
@@ -745,6 +755,12 @@ export function createApp(config = loadConfig()) {
           /* ignore */
         }
         return;
+      }
+      if (error instanceof PolicyError) {
+        return sendJson(res, 400, {
+          ok: false,
+          error: { code: 'POLICY_ERROR', message: error.message, details: error.details ?? null },
+        });
       }
       if (error instanceof AppError) {
         if (error.status === 429 && error.details?.retryAfterSeconds) {

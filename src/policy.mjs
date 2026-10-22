@@ -38,6 +38,12 @@ export function defaultPolicy() {
       maxFiles: 100,
       maxTotalBytes: 2 * 1024 * 1024,
     },
+    // 租户配额：0 表示不限制
+    quota: {
+      maxPackages: 0,
+      maxVersionsPerPackage: 0,
+      maxStorageBytes: 0,
+    },
   };
 }
 
@@ -91,12 +97,26 @@ export function normalizePolicy(input, base = defaultPolicy()) {
   if (!Number.isInteger(auto.maxTotalBytes) || auto.maxTotalBytes < 1 || auto.maxTotalBytes > MAX_TOTAL_BYTES_CAP) {
     errors.push({ field: 'autoApprove.maxTotalBytes', message: `必须是 1..${MAX_TOTAL_BYTES_CAP} 的整数` });
   }
+  const baseQuota = base.quota || { maxPackages: 0, maxVersionsPerPackage: 0, maxStorageBytes: 0 };
+  const quotas = isPlainObject(input.quota) ? input.quota : {};
+  const quota = {
+    maxPackages: quotas.maxPackages === undefined ? baseQuota.maxPackages : quotas.maxPackages,
+    maxVersionsPerPackage:
+      quotas.maxVersionsPerPackage === undefined ? baseQuota.maxVersionsPerPackage : quotas.maxVersionsPerPackage,
+    maxStorageBytes: quotas.maxStorageBytes === undefined ? baseQuota.maxStorageBytes : quotas.maxStorageBytes,
+  };
+  for (const key of ['maxPackages', 'maxVersionsPerPackage', 'maxStorageBytes']) {
+    if (!Number.isInteger(quota[key]) || quota[key] < 0) {
+      errors.push({ field: `quota.${key}`, message: '必须是非负整数（0 表示不限制）' });
+    }
+  }
   if (errors.length > 0) throw new PolicyError('策略校验未通过', errors);
   return {
     schema: POLICY_SCHEMA,
     updatedAt: input.updatedAt ?? base.updatedAt ?? null,
     updatedBy: input.updatedBy ?? base.updatedBy ?? null,
     autoApprove: auto,
+    quota,
   };
 }
 
@@ -140,18 +160,48 @@ export function evaluateAutoApproval(policy, ctx = {}) {
   return { approve: failed.length === 0, reasons, failed };
 }
 
-/** 读取策略文件；不存在返回默认策略 */
-export function loadPolicy(config) {
-  const file = config?.files?.policy;
-  if (!file || !fs.existsSync(file)) return { policy: defaultPolicy(), source: 'default', file: file ?? null };
-  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  return { policy: normalizePolicy(raw), source: 'file', file };
+/** 归一化策略文件（多租户容器）：兼容旧的单策略文件 */
+export function normalizePolicyFile(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { schema: POLICY_SCHEMA, tenants: {} };
+  if (raw.tenants && typeof raw.tenants === 'object' && !Array.isArray(raw.tenants)) {
+    const tenants = {};
+    for (const [name, policy] of Object.entries(raw.tenants)) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) continue;
+      tenants[name] = normalizePolicy(policy);
+    }
+    return { schema: POLICY_SCHEMA, tenants };
+  }
+  // 旧格式：整个文件就是一个策略，归入 default 租户
+  return { schema: POLICY_SCHEMA, tenants: { default: normalizePolicy(raw) } };
 }
 
-/** 写入策略（原子替换） */
-export function savePolicy(config, policy) {
+/** 取某租户生效的策略（无租户级配置时回落到 default） */
+export function policyFor(policyFile, tenant = 'default') {
+  const tenants = policyFile?.tenants || {};
+  return tenants[tenant] || tenants.default || defaultPolicy();
+}
+
+/** 写入某租户策略，返回新的策略文件对象 */
+export function setPolicyFor(policyFile, tenant, policy) {
+  const tenants = { ...(policyFile?.tenants || {}) };
+  tenants[tenant] = normalizePolicy(policy);
+  return { schema: POLICY_SCHEMA, tenants };
+}
+
+/** 读取策略文件；不存在返回空容器（按需回落到 defaultPolicy） */
+export function loadPolicy(config) {
+  const file = config?.files?.policy;
+  if (!file || !fs.existsSync(file)) {
+    return { policies: { schema: POLICY_SCHEMA, tenants: {} }, source: 'default', file: file ?? null };
+  }
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return { policies: normalizePolicyFile(raw), source: 'file', file };
+}
+
+/** 写入策略文件（原子替换） */
+export function savePolicy(config, policies) {
   const file = config.files.policy;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  writeJsonAtomic(file, policy);
+  writeJsonAtomic(file, policies);
   return file;
 }

@@ -23,7 +23,7 @@ import {
   keyIdFor,
 } from './signing.mjs';
 import { buildSbom } from './sbom.mjs';
-import { evaluateAutoApproval, defaultPolicy } from './policy.mjs';
+import { evaluateAutoApproval, policyFor, setPolicyFor } from './policy.mjs';
 import { qualityOf } from './quality.mjs';
 
 export const VERSION_STATUSES = ['pending', 'published', 'rejected'];
@@ -43,16 +43,69 @@ export function createStore(config, { audit, users, transparency } = {}) {
   const db = backend.load();
 
   let signingKey = null;
-  let autoPolicy = defaultPolicy();
+  let policies = { schema: 'agentdock-policy@1', tenants: {} };
 
-  /** 设置自动审批策略（由 app 启动/更新策略时调用） */
-  function setPolicy(next) {
-    autoPolicy = next;
-    return autoPolicy;
+  /** 设置多租户策略容器（由 app 启动/更新策略时调用） */
+  function setPolicies(next) {
+    policies = next && typeof next === 'object' && next.tenants ? next : { schema: 'agentdock-policy@1', tenants: {} };
+    return policies;
   }
 
-  function getPolicy() {
-    return autoPolicy;
+  function getPolicies() {
+    return policies;
+  }
+
+  /** 写入单租户策略（便捷方法，测试用） */
+  function setPolicy(next, tenant = 'default') {
+    policies = setPolicyFor(policies, tenant, next);
+    return getPolicy(tenant);
+  }
+
+  /** 读取某租户生效策略（无租户级配置时回落到 default，再回落到内置默认） */
+  function getPolicy(tenant = 'default') {
+    return policyFor(policies, tenant);
+  }
+
+  /** 配额检查：发布前按租户策略中的 quota 校验 */
+  function enforceQuota(tenant, pkgKey, kind, name, totalBytes) {
+    const quota = getPolicy(tenant).quota;
+    if (!quota) return;
+    const owned = Object.values(db.packages).filter((item) => (item.tenant || 'default') === tenant);
+    const pkg = db.packages[pkgKey];
+    const sameTenantPkg = pkg && (pkg.tenant || 'default') === tenant;
+    if (quota.maxPackages > 0 && !sameTenantPkg && owned.length >= quota.maxPackages) {
+      throw unprocessable('租户能力包数量已达上限', {
+        quota: 'maxPackages',
+        limit: quota.maxPackages,
+        current: owned.length,
+      });
+    }
+    if (quota.maxVersionsPerPackage > 0 && sameTenantPkg) {
+      const count = Object.keys(pkg.versions || {}).length;
+      if (count >= quota.maxVersionsPerPackage) {
+        throw unprocessable('该包版本数量已达租户上限', {
+          quota: 'maxVersionsPerPackage',
+          limit: quota.maxVersionsPerPackage,
+          current: count,
+          package: `${kind}/${name}`,
+        });
+      }
+    }
+    if (quota.maxStorageBytes > 0) {
+      const used = owned.reduce(
+        (sum, item) =>
+          sum + Object.values(item.versions || {}).reduce((inner, version) => inner + (version.totalBytes || 0), 0),
+        0,
+      );
+      if (used + totalBytes > quota.maxStorageBytes) {
+        throw unprocessable('租户存储配额不足', {
+          quota: 'maxStorageBytes',
+          limit: quota.maxStorageBytes,
+          current: used,
+          requested: totalBytes,
+        });
+      }
+    }
   }
 
   const getSigningKey = () => {
@@ -171,6 +224,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       fs.rmSync(versionDir(bundle.kind, bundle.name, bundle.version), { recursive: true, force: true });
       delete pkg.versions[bundle.version];
     }
+    enforceQuota(tenant, pkgKey, bundle.kind, bundle.name, bundle.totalBytes);
 
     const publisherSignature = verifyPublisherSignature({ input, bundle, actorId, actor });
 
@@ -242,8 +296,9 @@ export function createStore(config, { audit, users, transparency } = {}) {
 
     // 策略自动审批：满足条件的版本直接发布（仍会签名 + 写透明日志）
     let autoApproved = false;
-    if (autoPolicy?.autoApprove?.enabled) {
-      const evaluation = evaluateAutoApproval(autoPolicy, {
+    const tenantPolicy = getPolicy(tenant);
+    if (tenantPolicy?.autoApprove?.enabled) {
+      const evaluation = evaluateAutoApproval(tenantPolicy, {
         kind: bundle.kind,
         fileCount: versionDoc.fileCount,
         totalBytes: versionDoc.totalBytes,
@@ -716,6 +771,8 @@ export function createStore(config, { audit, users, transparency } = {}) {
     backend: backend.kind,
     backendInfo: () => backend.info(),
     close: () => backend.close(),
+    setPolicies,
+    getPolicies,
     setPolicy,
     getPolicy,
     sbom,

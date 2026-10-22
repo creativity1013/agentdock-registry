@@ -409,7 +409,7 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
-自动审批策略持久化在 `data/policy.json`（`PUT /api/v1/policy` 或 `agentdock policy set` 写入，重启后仍生效）；每个版本的 SBOM 随发布写盘到 `data/packages/<kind>/<name>/<version>/sbom.json`。
+自动审批策略持久化在 `data/policy.json`（`PUT /api/v1/policy` 或 `agentdock policy set` 写入，重启后仍生效）；**策略按租户隔离**：文件结构为 `{ "tenants": { "<租户>": { autoApprove, quota } } }`，未配置的租户回落到 `default` 租户策略；`GET/PUT /api/v1/policy` 读写当前令牌所属租户的策略（兼容旧的单策略文件，加载时自动归入 `default`）。每个版本的 SBOM 随发布写盘到 `data/packages/<kind>/<name>/<version>/sbom.json`。
 
 ## 导入 Claude Code agents
 
@@ -498,6 +498,16 @@ agentdock policy show                     # reviewer
 
 也可以在 Web 端操作：admin 登录后顶部「策略」标签页提供表单化编辑（启用开关、类型多选、受信发布者列表、是否要求发布者签名、中危阈值、文件数/体积上限），保存即调用 `PUT /api/v1/policy`，重启后从 `data/policy.json` 恢复；reviewer 可在 CLI 用 `policy show` 查看（Web 页仅 admin 可进）。
 
+**租户级策略与配额**：SSO/多租户模式下，每个租户可各自启用自动审批与设置配额，互不影响（`GET/PUT /api/v1/policy` 以令牌的 `tenant` 为作用域）。配额字段位于策略的 `quota` 对象：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `quota.maxPackages` | `0` | 该租户允许的能力包数量，`0` 不限制 |
+| `quota.maxVersionsPerPackage` | `0` | 单个包允许的版本数上限，`0` 不限制 |
+| `quota.maxStorageBytes` | `0` | 该租户所有版本的总字节数上限，`0` 不限制 |
+
+超过配额时发布返回 `422`，错误 `details.quota` 标明命中的配额项（`maxPackages` / `maxVersionsPerPackage` / `maxStorageBytes`）。
+
 规则：`kinds` 白名单、`trustedPublishers` 白名单（空数组表示不限制发布者）、`requirePublisherSignature`、高危必须为 0、中危不超过 `maxMedium`、文件数/总体积上限、扫描未命中阻断阈值、且已生成 SBOM。未通过自动审批的版本会记录 `review.auto_skipped` 审计事件（含失败规则）；自动通过的版本记录 `review.auto_approve`，透明日志事件带 `review.auto: true`。
 
 ## SQLite 存储后端（可选）
@@ -582,7 +592,7 @@ agentdock/
 │   ├── transparency.mjs     # 可验证透明日志（哈希链 + Merkle 树 + 包含证明）
 │   ├── registry.mjs         # 外部 registry 互操作（GitHub / MCP registry 导入 + 市场目录导出）
 │   ├── sbom.mjs             # SBOM 生成（文件哈希 + 工具/MCP/技能组件 + digest）
-│   ├── policy.mjs           # 自动审批策略（归一化/校验/规则求值）
+│   ├── policy.mjs           # 多租户策略容器 + 配额（归一化/校验/规则求值）
 │   ├── backend.mjs          # 元数据后端选择（json / sqlite 统一接口）
 │   ├── sqlite.mjs           # node:sqlite 后端（关系表 + WAL + db.json 自动迁移）
 │   ├── auth.mjs             # 令牌/角色/发布者密钥/OIDC 账号
@@ -599,7 +609,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（116 个用例）
+├── tests/                   # node:test 测试（118 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
