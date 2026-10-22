@@ -88,6 +88,7 @@ POST /install-event                 installs 计数 + 审计
 data/
 ├── db.json                      # 版本库元数据（唯一可变索引）
 ├── users.json                   # 用户与令牌哈希
+├── signing-key.json             # 平台 ed25519 签名私钥（600，务必备份）
 ├── BOOTSTRAP-TOKENS.txt         # 首次启动的明文令牌（600，可删）
 ├── audit.log                    # append-only JSONL 审计
 └── packages/
@@ -161,6 +162,20 @@ data/
 
 动作命名：`package.publish`、`package.install`（meta.target 区分安装目标）、`review.approve`、`review.reject`、`user.create_token`。
 
+### 平台签名（signing-key.json + version.signature）
+
+- 首次需要签名时自动生成 ed25519 密钥对：私钥只落盘 `data/signing-key.json`（600），公钥由 `GET /api/v1/keys` 公开。
+- 审核通过（`published`）时对规范化载荷签名并写入版本元数据：
+
+  ```
+  payload   = "agentdock-v1\n<kind>\n<name>\n<version>\n<contentHash>"
+  signature = ed25519_sign(privateKey, payload)   // {algorithm, keyId, payload, signature, signedAt}
+  ```
+
+  `contentHash = sha256(JSON.stringify(sorted [[path, sha256(file), encoding], ...]))`，由 `bundle.computeContentHash` 统一定义。
+- 验签分两步：① 重新读取 `packages/.../files/` 计算 `diskContentHash` 与发布记录比对（防存储篡改）；② 用平台公钥校验 ed25519 签名与载荷。`store.verifySignature`、`GET .../signature?verify=1`、CLI `verify-signature` 共用该逻辑。
+- 签名只覆盖已发布版本；被拒绝版本不签名，重新发布会生成新的 contentHash，旧签名不再对应。
+
 ### meta.json 与 db.json 的关系
 
 `db.json` 是热索引（市场列表、审核队列、安装计数直接读它），`meta.json` 是版本目录内的自描述副本（便于备份/迁移/人工检查）。写入时先落 meta + files，再原子更新 db.json。当前没有自动重建索引的接口：迁移时可从 `packages/<kind>/<name>/<version>/meta.json` 人工恢复（重建索引列入 roadmap）。
@@ -176,9 +191,10 @@ data/
 | `src/scan.mjs` | 安全规则引擎 | `scanBundle`、`scanVerdict`、`SEVERITY_ORDER` |
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
 | `src/diff.mjs` | 行级/文件级差异（LCS + 规模上限降级） | `diffLines`、`diffBundles` |
-| `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished`） |
+| `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature`） |
 | `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
+| `src/signing.mjs` | ed25519 内容签名/验签（平台密钥管理） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`keyIdFor` |
 | `src/auth.mjs` | 用户/令牌/角色 | `createUserDirectory`、`tokenFromRequest` |
 | `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
@@ -195,6 +211,7 @@ data/
 4. **审计**：所有写操作（发布、审核、安装、令牌创建）均记录，append-only JSONL。
 5. **扫描**：启发式规则，可配置阻断阈值；`overrideScan` 仅 admin、且事件写入审计。
 6. **网络**：默认仅监听 `127.0.0.1`；无内置 TLS，生产部署应置于反向代理后。
+7. **内容签名与完整性**：审核通过即用平台 ed25519 私钥签名（绑定 kind/name/version/contentHash）；公钥公开、可离线验签；验签时重算磁盘内容哈希，可发现发布后对 `packages/` 内容的替换。平台签名证明「曾经本平台审核、未被替换」，不等价于发布者身份——发布者密钥签名与透明日志列入 Roadmap。
 
 ## 6. 安装目标模型
 
@@ -275,7 +292,7 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 ## 9. 测试策略
 
-- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级）。
+- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。

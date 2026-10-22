@@ -102,6 +102,8 @@ agentdock import-claude --presets --profile web   # 生成并自动并入 web pr
 | `review approve\|reject <kind/name@version>` | 审核操作（`--note`） |
 | `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段 |
 | `audit` | 查看审计日志（`--limit --action --json`） |
+| `verify-signature <kind/name[@version]>` | 验证内容签名（ed25519）；同时重算磁盘内容哈希发现篡改（`--json`） |
+| `keys` | 导出平台签名公钥（可用于离线验签） |
 | `tokens create\|list` | 令牌管理（需 admin） |
 | `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
 
@@ -236,6 +238,7 @@ my-plugin/
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/health` | 公开 | 健康检查 |
+| GET | `/keys` | 公开 | 平台签名公钥（ed25519，`keyId` + PEM）及各版本签名可离线验证 |
 | GET | `/stats` | 公开 | 市场统计 |
 | GET | `/me` | 登录 | 当前令牌身份 |
 | GET | `/targets` | 公开 | 可用安装目标 |
@@ -246,6 +249,7 @@ my-plugin/
 | GET | `/packages/:kind/:name/versions/:version` | 公开（pending 需审核权限） | 版本详情 |
 | GET | `/packages/:kind/:name/versions/:version/bundle` | 公开 | 下载完整内容 |
 | GET | `/packages/:kind/:name/versions/:version/files?path=` | 公开 | 预览单个文件 |
+| GET | `/packages/:kind/:name/versions/:version/signature?verify=1` | 公开（pending 需审核权限） | 版本签名；`verify=1` 会重算磁盘内容哈希并验签 |
 | GET | `/packages/:kind/:name/diff?to=&from=` | 公开（pending 需审核权限） | 版本差异（行级 diff；`from` 缺省为上一个已发布版本） |
 | POST | `/packages/:kind/:name/versions/:version/install-event` | 登录 | 登记安装事件 |
 | POST | `/install` | publisher | 安装到目标目录（服务端权限内） |
@@ -353,6 +357,7 @@ agentdock/
 │   ├── targets.mjs          # 安装目标解析与落盘计划
 │   ├── diff.mjs             # 行级/文件级 diff（LCS + 规模上限降级）
 │   ├── dsh-preset.mjs       # agent 包 → DSH agent-preset 片段（tools 映射、profile 合并）
+│   ├── signing.mjs          # ed25519 内容签名/验签（审核通过即签名，公钥公开）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
 │   ├── config.mjs           # 配置与数据目录
@@ -363,7 +368,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（53 个用例）
+├── tests/                   # node:test 测试（60 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -390,14 +395,17 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip。
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
 - 扫描是**启发式规则**，不是沙箱：绕过规则注入的能力包仍可能危险，审核环节不可省。
-- 市场已支持分页与服务端搜索；当前无 SSO/多租户、无内容签名验证（内容哈希仅用于一致性校验）。
+- **内容签名**：版本审核通过时，平台用 ed25519 私钥对规范化载荷 `agentdock-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名；私钥存于 `data/signing-key.json`（600 权限，务必备份），公钥通过 `GET /api/v1/keys` 公开，任何人可离线验签。`verify-signature` / `?verify=1` 会同时重算磁盘内容哈希，能发现发布后对存储内容的替换或篡改。
+- 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源；发布者密钥签名与可验证透明日志列入 Roadmap。
+- 市场已支持分页与服务端搜索；当前无 SSO/多租户。
 - diff 视图只做行级对比：二进制文件仅标记变化，超大文件（>512KB 或 >2000 行）退化为整文件标记。
 
 ## Roadmap
 
 - [x] 市场分页、服务端搜索与类型筛选
 - [x] markdown 安全渲染与审核 diff 视图
-- [ ] 内容签名（ed25519）与 `verify --signature`
+- [x] 内容签名（ed25519）与 `verify-signature` 验签接口
+- [ ] 发布者密钥签名 / 可验证透明日志（透明日志记录所有上架事件）
 - [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
 - [ ] 与外部 registry（GitHub / skills.sh / MCP registry）双向同步
 - [ ] 依赖清单与 SBOM、按策略自动审批

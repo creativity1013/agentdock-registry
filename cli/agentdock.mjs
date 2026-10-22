@@ -35,6 +35,10 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock install <kind>/<name>[@version] [--target dsh|dsh-agent|claude|codex|shared|dir] [--dir <路径>] [--force] [--profile <profile>]
                                                    target=dsh-agent 生成 DSH preset 片段；--profile 会并入该 profile 的 cordis.patch.yml
 
+  agentdock verify-signature <kind>/<name>[@version]
+                                                   验证平台内容签名（ed25519，重算磁盘内容哈希）
+  agentdock keys                                   查看平台签名公钥（可离线验签）
+
   agentdock review list                            审核队列（需 reviewer 角色）
   agentdock review approve <kind>/<name>@<version> [--note "..."]
   agentdock review reject  <kind>/<name>@<version> [--note "..."]
@@ -453,6 +457,56 @@ async function cmdInstall(positionals, flags) {
   }
 }
 
+async function cmdKeys(flags) {
+  const conn = resolveConnection(flags);
+  const data = await api(conn, 'GET', '/api/v1/keys');
+  if (flags.json) return console.log(JSON.stringify(data, null, 2));
+  for (const key of data.keys) {
+    console.log(`算法：${key.algorithm}`);
+    console.log(`keyId：${key.keyId}`);
+    console.log(`创建时间：${new Date(key.createdAt).toLocaleString('zh-CN', { hour12: false })}`);
+    console.log('公钥（PEM）：');
+    console.log(key.publicKey.trimEnd());
+  }
+  console.log('\n离线验签：用该公钥对载荷 [agentdock-v1, kind, name, version, contentHash].join(\'\\n\') 做 ed25519 验签。');
+}
+
+async function cmdVerifySignature(positionals, flags) {
+  const spec = parseSpec(positionals[0]);
+  const conn = resolveConnection(flags);
+  let version = spec.version;
+  if (!version) {
+    const detail = await api(conn, 'GET', `/api/v1/packages/${spec.kind}/${spec.name}`);
+    if (!detail.latestVersion) throw new Error('该包还没有已发布版本');
+    version = detail.latestVersion;
+  }
+  const data = await api(
+    conn,
+    'GET',
+    `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/signature?verify=1`,
+  );
+  if (flags.json) {
+    console.log(JSON.stringify(data, null, 2));
+    if (!data.valid) process.exitCode = 1;
+    return;
+  }
+  console.log(`▸ ${spec.kind}/${spec.name}@${version}`);
+  console.log(`  状态：${data.statusLabel || data.status}${data.signed ? '（已签名）' : '（未签名）'}`);
+  if (data.keyId) console.log(`  keyId：${data.keyId}（${data.algorithm || 'ed25519'}）`);
+  if (data.signedAt) console.log(`  签名时间：${new Date(data.signedAt).toLocaleString('zh-CN', { hour12: false })}`);
+  if (data.contentHash) console.log(`  contentHash：${data.contentHash}`);
+  if (data.diskContentHash && data.diskContentHash !== data.contentHash) {
+    console.log(`  磁盘哈希：${data.diskContentHash}（不一致！）`);
+  }
+  if (data.valid) {
+    console.log('  ✓ 签名有效，内容完整性校验通过');
+  } else {
+    console.log('  ✗ 签名校验未通过：');
+    for (const reason of data.reasons || []) console.log(`    - ${reason}`);
+    process.exitCode = 1;
+  }
+}
+
 async function cmdReview(positionals, flags) {
   const conn = resolveConnection(flags);
   requireToken(conn);
@@ -651,6 +705,10 @@ async function main() {
       return cmdReview(positionals, flags);
     case 'audit':
       return cmdAudit(flags);
+    case 'keys':
+      return cmdKeys(flags);
+    case 'verify-signature':
+      return cmdVerifySignature(positionals, flags);
     case 'tokens':
       return cmdTokens(positionals, flags);
     case 'import-claude':

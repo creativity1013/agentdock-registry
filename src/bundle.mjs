@@ -167,7 +167,7 @@ export function normalizeBundle(input) {
     bytes: f.bytes,
     sha256: sha256(f.buf),
   }));
-  const contentHash = sha256(JSON.stringify(manifestFiles.map((f) => [f.path, f.sha256, f.encoding])));
+  const contentHash = computeContentHash(manifestFiles);
 
   return {
     ok: true,
@@ -186,6 +186,17 @@ export function normalizeBundle(input) {
       totalBytes,
     },
   };
+}
+
+/**
+ * 由文件清单计算内容哈希：对 [path, sha256, encoding] 排序后取 SHA-256。
+ * 服务端签名与验签、安装清单校验都复用同一个定义。
+ */
+export function computeContentHash(manifestFiles) {
+  const entries = [...manifestFiles]
+    .map((file) => [file.path, file.sha256, file.encoding])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return sha256(JSON.stringify(entries));
 }
 
 /** 安全的对外文件清单（不含内容） */

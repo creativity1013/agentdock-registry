@@ -9,11 +9,12 @@ import {
   sha256,
   compareVersions,
 } from './util.mjs';
-import { KINDS, KIND_LABEL, isValidName } from './bundle.mjs';
+import { KINDS, KIND_LABEL, isValidName, computeContentHash } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
 import { analyzeInput } from './pipeline.mjs';
 import { ensureDataLayout } from './config.mjs';
 import { badRequest, conflict, notFound, unprocessable } from './errors.mjs';
+import { loadOrCreateSigningKey, signVersion, verifyVersionSignature } from './signing.mjs';
 
 export const VERSION_STATUSES = ['pending', 'published', 'rejected'];
 export const VERSION_STATUS_LABEL = { pending: '待审核', published: '已发布', rejected: '已拒绝' };
@@ -34,6 +35,12 @@ export function createStore(config, { audit } = {}) {
   if (!db || typeof db !== 'object' || !db.packages || typeof db.packages !== 'object') {
     db = { schemaVersion: 1, packages: {} };
   }
+
+  let signingKey = null;
+  const getSigningKey = () => {
+    if (!signingKey) signingKey = loadOrCreateSigningKey(config);
+    return signingKey;
+  };
 
   const persist = () => writeJsonAtomic(dbFile, db);
   const keyOf = (kind, name) => `${kind}/${name}`;
@@ -166,6 +173,15 @@ export function createStore(config, { audit } = {}) {
     if (versionDoc.status !== 'pending') {
       throw conflict(`该版本当前状态为「${VERSION_STATUS_LABEL[versionDoc.status]}」，不能重复审核`);
     }
+    const signature =
+      decision === 'approve'
+        ? signVersion(getSigningKey(), {
+            kind,
+            name,
+            version: versionDoc.version,
+            contentHash: versionDoc.contentHash,
+          })
+        : null;
     versionDoc.status = decision === 'approve' ? 'published' : 'rejected';
     versionDoc.review = {
       decision,
@@ -173,13 +189,14 @@ export function createStore(config, { audit } = {}) {
       reviewer: actor,
       reviewedAt: nowIso(),
     };
+    if (signature) versionDoc.signature = signature;
     persist();
     audit?.append({
       actor,
       role,
       action: decision === 'approve' ? 'review.approve' : 'review.reject',
       target: `${kind}/${name}@${version}`,
-      meta: { note: note.trim().slice(0, 200) },
+      meta: { note: note.trim().slice(0, 200), ...(signature ? { keyId: signature.keyId } : {}) },
       ip,
     });
     return versionDoc;
@@ -230,6 +247,7 @@ export function createStore(config, { audit } = {}) {
       scan: versionDoc.scan,
       submittedAt: versionDoc.submittedAt,
       contentHash: versionDoc.contentHash,
+      signature: versionDoc.signature ?? null,
       files,
     };
   }
@@ -255,6 +273,89 @@ export function createStore(config, { audit } = {}) {
     const abs = path.join(filesDir(kind, name, versionDoc.version), file.path);
     if (!fs.existsSync(abs)) throw notFound('存储文件缺失');
     return { path: file.path, bytes: file.bytes, content: fs.readFileSync(abs, 'utf8') };
+  }
+
+  /** 平台签名公钥信息（公开，供离线验签） */
+  function signingKeyInfo() {
+    const key = getSigningKey();
+    return {
+      algorithm: key.algorithm,
+      keyId: key.keyId,
+      publicKey: key.publicKeyPem,
+      createdAt: key.createdAt,
+    };
+  }
+
+  /**
+   * 验证某个版本的平台签名：
+   * 1) 重新读取磁盘文件计算 contentHash，与发布时记录比对（防篡改存储）；
+   * 2) 用平台公钥验证 ed25519 签名与载荷。
+   */
+  function verifySignature(kind, name, version) {
+    const versionDoc = getVersion(kind, name, version);
+    if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+    if (!versionDoc.signature) {
+      return {
+        kind,
+        name,
+        version,
+        status: versionDoc.status,
+        statusLabel: VERSION_STATUS_LABEL[versionDoc.status],
+        signed: false,
+        valid: false,
+        reasons: [
+          versionDoc.status === 'published' ? '该版本没有签名记录' : `版本状态为「${VERSION_STATUS_LABEL[versionDoc.status]}」，尚未签名`,
+        ],
+        contentHash: versionDoc.contentHash,
+      };
+    }
+    const base = filesDir(kind, name, versionDoc.version);
+    const reasons = [];
+    let diskContentHash = null;
+    try {
+      const manifestFiles = versionDoc.files.map((file) => {
+        const abs = path.join(base, file.path);
+        if (!fs.existsSync(abs)) {
+          reasons.push(`存储文件缺失：${file.path}`);
+          return { path: file.path, encoding: file.encoding, bytes: 0, sha256: '' };
+        }
+        const buf = fs.readFileSync(abs);
+        return { path: file.path, encoding: file.encoding, bytes: buf.length, sha256: sha256(buf) };
+      });
+      diskContentHash = computeContentHash(manifestFiles);
+    } catch (error) {
+      reasons.push(`读取存储内容失败：${error.message}`);
+    }
+    if (diskContentHash && diskContentHash !== versionDoc.contentHash) {
+      reasons.push('存储内容已被修改：磁盘内容哈希与发布时记录的 contentHash 不一致');
+    }
+    const result = verifyVersionSignature({
+      kind,
+      name,
+      version: versionDoc.version,
+      contentHash: versionDoc.contentHash,
+      signature: versionDoc.signature,
+      publicKeyPem: getSigningKey().publicKeyPem,
+    });
+    for (const reason of result.reasons) {
+      if (!reasons.includes(reason)) reasons.push(reason);
+    }
+    return {
+      kind,
+      name,
+      version,
+      status: versionDoc.status,
+      statusLabel: VERSION_STATUS_LABEL[versionDoc.status],
+      signed: true,
+      valid: reasons.length === 0,
+      reasons,
+      algorithm: versionDoc.signature.algorithm,
+      keyId: versionDoc.signature.keyId,
+      signedAt: versionDoc.signature.signedAt,
+      contentHash: versionDoc.contentHash,
+      diskContentHash,
+      signature: versionDoc.signature,
+    };
   }
 
   function summarizePackage(pkgKey, pkg) {
@@ -417,6 +518,8 @@ export function createStore(config, { audit } = {}) {
     packageDetail,
     reviewQueue,
     recordInstall,
+    signingKeyInfo,
+    verifySignature,
     stats,
     latestPublished,
     keyOf,

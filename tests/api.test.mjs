@@ -419,3 +419,75 @@ test('审核 diff：默认对比上一个发布版本，未发布版本需审核
   const missing = await request('GET', '/packages/skill/demo-skill/diff?to=9.9.9');
   assert.equal(missing.status, 404);
 });
+
+test('内容签名：审核通过自动签名、公钥公开、篡改存储内容可检出', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.close());
+  const { request, tokens, config } = server;
+  const publisher = tokens.publisher;
+  const reviewer = tokens.reviewer;
+
+  // 发布后处于 pending，没有签名
+  const published = await request('POST', '/packages', { token: publisher, body: skillPayload() });
+  assert.equal(published.status, 201, JSON.stringify(published.data));
+  assert.equal(published.data.version.signature, null);
+
+  // 公钥公开可下载（无需认证）
+  const keys = await request('GET', '/keys');
+  assert.equal(keys.status, 200);
+  assert.equal(keys.data.keys.length, 1);
+  const key = keys.data.keys[0];
+  assert.equal(key.algorithm, 'ed25519');
+  assert.match(key.publicKey, /BEGIN PUBLIC KEY/);
+  assert.match(key.keyId, /^[0-9a-f]{32}$/);
+
+  // 待审核版本：reviewer 可查（未签名），匿名 404
+  const pendingVerify = await request('GET', '/packages/skill/demo-skill/versions/0.1.0/signature?verify=1', {
+    token: reviewer,
+  });
+  assert.equal(pendingVerify.status, 200);
+  assert.equal(pendingVerify.data.signed, false);
+  assert.equal(pendingVerify.data.valid, false);
+  const pendingAnon = await request('GET', '/packages/skill/demo-skill/versions/0.1.0/signature');
+  assert.equal(pendingAnon.status, 404);
+
+  // 审核通过 → 自动签名
+  const approved = await request('POST', '/review', {
+    token: reviewer,
+    body: { kind: 'skill', name: 'demo-skill', version: '0.1.0', decision: 'approve', note: 'LGTM' },
+  });
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  const signature = approved.data.version.signature;
+  assert.ok(signature, '审核通过后应有签名');
+  assert.equal(signature.algorithm, 'ed25519');
+  assert.equal(signature.keyId, key.keyId);
+  assert.ok(signature.signedAt);
+
+  // 版本详情带上签名
+  const detail = await request('GET', '/packages/skill/demo-skill/versions/0.1.0');
+  assert.equal(detail.status, 200);
+  assert.equal(detail.data.signature.payload, signature.payload);
+
+  // 匿名验签通过
+  const verified = await request('GET', '/packages/skill/demo-skill/versions/0.1.0/signature?verify=1');
+  assert.equal(verified.status, 200);
+  assert.equal(verified.data.valid, true, JSON.stringify(verified.data.reasons));
+  assert.equal(verified.data.contentHash, detail.data.contentHash);
+  assert.equal(verified.data.diskContentHash, detail.data.contentHash);
+  assert.deepEqual(verified.data.reasons, []);
+
+  // 篡改服务端存储的内容 → 验签失败
+  const filePath = path.join(config.files.packages, 'skill', 'demo-skill', '0.1.0', 'files', 'SKILL.md');
+  const original = fs.readFileSync(filePath, 'utf8');
+  fs.writeFileSync(filePath, `${original}\n\n偷偷加的内容。\n`);
+  const tampered = await request('GET', '/packages/skill/demo-skill/versions/0.1.0/signature?verify=1');
+  assert.equal(tampered.status, 200);
+  assert.equal(tampered.data.valid, false);
+  assert.ok(tampered.data.reasons.some((reason) => reason.includes('存储内容已被修改')));
+  assert.notEqual(tampered.data.diskContentHash, tampered.data.contentHash);
+
+  // 恢复原内容后再次验签通过
+  fs.writeFileSync(filePath, original);
+  const restored = await request('GET', '/packages/skill/demo-skill/versions/0.1.0/signature?verify=1');
+  assert.equal(restored.data.valid, true, JSON.stringify(restored.data.reasons));
+});

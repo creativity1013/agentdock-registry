@@ -613,6 +613,21 @@ function paintPreview() {
   );
 }
 
+async function verifySignature(pkg, version) {
+  try {
+    const data = await api(
+      `/packages/${encodeURIComponent(pkg.kind)}/${encodeURIComponent(pkg.name)}/versions/${encodeURIComponent(version)}/signature?verify=1`,
+    );
+    if (data.valid) {
+      toast(`签名有效 · ${data.keyId.slice(0, 16)}… · 内容完整性校验通过`, 'ok');
+    } else {
+      toast(`验签未通过：${(data.reasons || []).join('；')}`, 'error');
+    }
+  } catch (error) {
+    toast(`验签失败：${error.message}`, 'error');
+  }
+}
+
 function paintDetail() {
   const body = $('#modal-body');
   const { pkg } = state.detail;
@@ -650,6 +665,19 @@ function paintDetail() {
       selected ? h('span', { class: 'v' }, selected.contentHash.slice(0, 24) + '…') : null,
       selected?.manifest?.capabilities ? h('span', { class: 'k' }, '能力') : null,
       selected?.manifest?.capabilities ? h('span', { class: 'v' }, describeCapabilities(selected.manifest.capabilities) || '-') : null,
+      selected?.signature ? h('span', { class: 'k' }, '内容签名') : null,
+      selected?.signature
+        ? h(
+            'span',
+            { class: 'v' },
+            h('span', { class: 'mono' }, `ed25519 · ${selected.signature.keyId.slice(0, 16)}…`),
+            h('button', {
+              class: 'btn btn-ghost btn-sm',
+              type: 'button',
+              onClick: () => verifySignature(pkg, selected.version),
+            }, '验签'),
+          )
+        : null,
     ),
   );
 

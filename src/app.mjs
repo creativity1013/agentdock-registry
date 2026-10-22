@@ -82,6 +82,11 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { ok: true, name: 'agentdock', version: config.version, time: new Date().toISOString() });
     }
 
+    // 平台签名公钥（公开，任何人可下载后离线验签）
+    if (route === 'keys' && method === 'GET') {
+      return sendJson(res, 200, { ok: true, keys: [store.signingKeyInfo()] });
+    }
+
     if (route === 'stats' && method === 'GET') {
       return sendJson(res, 200, store.stats());
     }
@@ -171,6 +176,32 @@ export function createApp(config = loadConfig()) {
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
       return sendJson(res, 200, publicVersion(versionDoc));
+    }
+
+    // 版本签名 / 验签（?verify=1 会重算磁盘内容）
+    const signatureMatch = pathname.match(
+      /^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)\/signature$/,
+    );
+    if (signatureMatch && method === 'GET') {
+      const [, kind, name, version] = signatureMatch;
+      const versionDoc = store.getVersion(kind, name, version);
+      if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+      const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
+      if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
+      if (url.searchParams.get('verify') === '1') {
+        const result = store.verifySignature(kind, name, versionDoc.version);
+        return sendJson(res, 200, { ok: result.valid, ...result, publicKey: store.signingKeyInfo() });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        kind,
+        name,
+        version: versionDoc.version,
+        status: versionDoc.status,
+        contentHash: versionDoc.contentHash,
+        signature: versionDoc.signature ?? null,
+        publicKey: store.signingKeyInfo(),
+      });
     }
 
     // 下载完整能力包（CLI 安装用）
@@ -393,6 +424,7 @@ function publicVersion(versionDoc) {
     description: versionDoc.description,
     tags: versionDoc.tags,
     contentHash: versionDoc.contentHash,
+    signature: versionDoc.signature ?? null,
     fileCount: versionDoc.fileCount,
     totalBytes: versionDoc.totalBytes,
     files: versionDoc.files,

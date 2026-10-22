@@ -125,6 +125,13 @@ async function main() {
   assert(audit.includes('package.install'), '审计日志缺少 package.install');
   console.log('✓ 安装计数与审计日志正常');
 
+  // 内容签名：审核通过后自动 ed25519 签名，CLI 可验签、可导出公钥
+  const verified = await runCli(['verify-signature', 'skill/code-reviewer'], tokens.publisher);
+  assert(verified.includes('签名有效'), `CLI 验签未通过：\n${verified}`);
+  const keys = await runCli(['keys'], tokens.publisher);
+  assert(keys.includes('ed25519') && keys.includes('BEGIN PUBLIC KEY'), 'CLI keys 缺少公钥');
+  console.log('✓ 内容签名：审核后自动签名，CLI 验签与公钥查询正常');
+
   // 冒烟结果
   const stats = await fetch(`${server.url}/api/v1/stats`).then((response) => response.json());
   console.log('');

@@ -40,6 +40,7 @@ export function loadConfig(env = process.env, overrides = {}) {
       bootstrapTokens: path.join(dataDir, 'BOOTSTRAP-TOKENS.txt'),
       audit: path.join(dataDir, 'audit.log'),
       packages: path.join(dataDir, 'packages'),
+      signingKey: path.join(dataDir, 'signing-key.json'),
     },
   };
   return config;
