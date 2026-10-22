@@ -26,6 +26,7 @@ const state = {
   reviewRisk: 'all',
   auditTenant: '',
   page: 1,
+  installWritable: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -299,6 +300,7 @@ async function login() {
     renderAuth();
     updateTabs();
     toast(`已登录：${state.user.name}（${ROLE_LABEL[state.user.role]}）`, 'ok');
+    await loadHealth();
     render();
   } catch (error) {
     state.token = '';
@@ -330,6 +332,15 @@ async function logout() {
 async function loadMe() {
   const data = await api('/me');
   state.user = data.user;
+}
+
+async function loadHealth() {
+  try {
+    const data = await api('/health');
+    state.installWritable = data.install?.writable ?? null;
+  } catch {
+    state.installWritable = null;
+  }
 }
 
 /* ------------------------------ 标签页 ------------------------------ */
@@ -1065,6 +1076,9 @@ function actionControls(pkg, selected) {
           },
         }, '下载 JSON 包')),
       h('span', { class: 'hint' }, '安装到平台主机（仅单机/演示用；写入的是运行 AgentDock 的这台机器）：'),
+      state.installWritable === false
+        ? h('span', { class: 'hint' }, '⚠ 当前服务运行在受限环境（无写权限），这里会失败；请用上方「成员本机安装」命令，或用可写目录启动服务（AGENTDOCK_INSTALL_HOME）。')
+        : null,
       targetSelect,
       dirInput,
       h('label', { class: 'hint' }, force, ' 覆盖已有文件'),
@@ -1734,6 +1748,7 @@ async function init() {
       /* 未登录 */
     }
   }
+  if (state.token) await loadHealth();
   try {
     const config = await (await fetch('/auth/config')).json();
     state.oidcEnabled = Boolean(config.enabled);

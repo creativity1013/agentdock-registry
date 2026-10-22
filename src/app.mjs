@@ -217,7 +217,21 @@ export function createApp(config = loadConfig()) {
     const requireRole = (role) => users.requireRole(auth, role);
 
     if (route === 'health' && method === 'GET') {
-      return sendJson(res, 200, { ok: true, name: 'agentdock', version: config.version, time: new Date().toISOString() });
+      const installBase = config.installHome || config.home;
+      let installWritable = false;
+      try {
+        fs.accessSync(installBase, fs.constants.W_OK);
+        installWritable = true;
+      } catch {
+        installWritable = false;
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        name: 'agentdock',
+        version: config.version,
+        time: new Date().toISOString(),
+        install: { writable: installWritable, base: installBase },
+      });
     }
 
     // 平台签名公钥（公开，任何人可下载后离线验签）
