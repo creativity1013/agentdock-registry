@@ -436,7 +436,7 @@ CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 |---|---|---|
 | 目录 | 直接发布一个本地目录（传统方式） | 根目录 `SKILL.md` / `agent.md` / `plugin.json` |
 | JSON bundle | `{kind,name,version,files:[…]}` | JSON 自带字段 |
-| 文件夹上传 | Web 选择整个文件夹（`webkitdirectory`），浏览器打包成 `{files:[…]}`；单次建议 ≤100MB | 同上，服务端自动识别；`.DS_Store`、`.git/`、`node_modules/`、`__MACOSX/` 等隐藏/系统文件自动忽略 |
+| 文件夹上传 | Web 选择整个文件夹（`webkitdirectory`），浏览器打包成 `{files:[…]}`；单次建议 ≤100MB | 同上，服务端自动识别；`.DS_Store`、`.git/`、`node_modules/`、`__MACOSX/` 等自动忽略；多套一层目录自动剥离；选中多个包时批量导入 |
 | `.zip` | Agent Skills 市场、GitHub「Download ZIP」等常见打包 | 自动剥离 GitHub 的单层根目录；识别根目录清单 |
 | `.tar.gz` / `.tgz` / `.tar` | npm/脚本发布物常用格式 | 同上 |
 | 单文件 `.md` | Agent Skills / Claude Code agent 的裸文件 | frontmatter 有 `tools`/`model` 判定为 agent，否则 skill |

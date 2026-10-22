@@ -159,27 +159,81 @@ function cleanImportFiles(files) {
   return cleaned;
 }
 
-async function finalizeFromFiles(files, { filename, overrides, format, hints = {} } = {}) {
-  const cleaned = cleanImportFiles(files);
-  if (cleaned.length === 0) throw new ArchiveError('没有可导入的文件（隐藏文件、.git、node_modules 等已被过滤）');
-  const kind = overrides.kind || detectKind(cleaned) || 'skill';
+const MANIFEST_BASENAMES = new Set(['skill.md', 'agent.md', 'plugin.json']);
+
+function manifestRootsOf(files) {
+  const roots = [];
+  for (const file of files) {
+    const parts = file.path.split('/');
+    const base = parts[parts.length - 1].toLowerCase();
+    if (!MANIFEST_BASENAMES.has(base)) continue;
+    const root = parts.slice(0, -1).join('/');
+    if (!roots.includes(root)) roots.push(root);
+  }
+  return roots;
+}
+
+/**
+ * 文件夹里可能多套一层目录（如 parent/my-skill/SKILL.md），也可能一次选了一批包
+ * （parent/skill-a/SKILL.md + parent/skill-b/SKILL.md）。这里拆分出单个/多个包根目录。
+ */
+export function splitFolderPackages(files) {
+  const roots = manifestRootsOf(files);
+  if (roots.length === 0) return [{ root: '', files }];
+  if (roots.includes('')) return [{ root: '', files }];
+  if (roots.length === 1) {
+    const root = roots[0];
+    return [{
+      root,
+      files: files.filter((file) => file.path.startsWith(`${root}/`)).map((file) => ({ ...file, path: file.path.slice(root.length + 1) })),
+    }];
+  }
+  const topLevel = roots.every((root) => root.split('/').length === 1);
+  if (!topLevel) return [{ root: '', files }];
+  return roots.map((root) => ({
+    root,
+    files: files.filter((file) => file.path.startsWith(`${root}/`)).map((file) => ({ ...file, path: file.path.slice(root.length + 1) })),
+  }));
+}
+
+async function finalizeSinglePackage(files, { filename, overrides, format, hints = {} } = {}) {
+  const kind = overrides.kind || detectKind(files) || 'skill';
   const fallbackName = hints.name || overrides.name || slugifyName(stemOf(filename), 'imported-package');
   let meta;
   try {
-    meta = await describeImportedFiles(cleaned, { kind, fallbackName });
+    meta = await describeImportedFiles(files, { kind, fallbackName });
   } catch {
     meta = { name: fallbackName, version: '0.1.0', description: '', tags: ['imported'] };
   }
   return {
     format,
-    files: cleaned,
+    files,
     payload: {
       kind,
       name: overrides.name || meta.name || fallbackName,
       version: overrides.version || meta.version || '0.1.0',
       description: overrides.description || meta.description || hints.description || '',
       tags: overrides.tags || meta.tags || ['imported'],
-      files: cleaned,
+      files,
     },
   };
+}
+
+async function finalizeFromFiles(files, { filename, overrides, format, hints = {} } = {}) {
+  const cleaned = cleanImportFiles(files);
+  if (cleaned.length === 0) throw new ArchiveError('没有可导入的文件（隐藏文件、.git、node_modules 等已被过滤）');
+  const folders = splitFolderPackages(cleaned);
+  if (folders.length > 1) {
+    const packages = [];
+    for (const folder of folders) {
+      packages.push(await finalizeSinglePackage(folder.files, {
+        filename: folder.root,
+        overrides: { ...overrides, name: undefined, version: undefined },
+        format,
+        hints,
+      }));
+    }
+    return { format: `${format}-batch`, packages };
+  }
+  return finalizeSinglePackage(folders[0].files, { filename, overrides, format, hints });
 }

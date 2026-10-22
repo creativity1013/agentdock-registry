@@ -1482,7 +1482,12 @@ async function onPublishFolder(event) {
       method: 'POST',
       body: { files: entries },
     });
-    toast(`已导入 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核${skipped.length ? `（已忽略 ${skipped.length} 个隐藏/系统文件）` : ''}`, 'ok');
+    if (result.batch) {
+      const okCount = result.results.filter((item) => item.ok).length;
+      toast(`已批量导入 ${okCount}/${result.results.length} 个能力包${skipped.length ? `（已忽略 ${skipped.length} 个隐藏/系统文件）` : ''}`, okCount === result.results.length ? 'ok' : 'error');
+    } else {
+      toast(`已导入 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核${skipped.length ? `（已忽略 ${skipped.length} 个隐藏/系统文件）` : ''}`, 'ok');
+    }
     state.view = 'market';
     render();
     refreshBadge();

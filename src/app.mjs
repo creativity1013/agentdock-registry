@@ -458,6 +458,70 @@ export function createApp(config = loadConfig()) {
         if (error instanceof ArchiveError) throw unprocessable(`导入文件解析失败：${error.message}`);
         throw error;
       }
+      if (Array.isArray(built.packages)) {
+        const dryRun = query.get('dryRun') === '1';
+        const results = [];
+        for (const pkg of built.packages) {
+          if (dryRun) {
+            const report = analyzeInput(pkg.payload, { scanBlock: config.scanBlock });
+            results.push({
+              ok: report.valid && !report.blocked,
+              format: pkg.format,
+              kind: pkg.payload.kind,
+              name: pkg.payload.name,
+              version: pkg.payload.version,
+              valid: report.valid,
+              blocked: report.blocked,
+              errors: report.errors,
+              warnings: report.warnings,
+              summary: report.summary,
+            });
+            continue;
+          }
+          try {
+            const published = store.publish(pkg.payload, { actor: auth.name, actorId: auth.id, role: auth.role, ip, tenant });
+            audit.append({
+              actor: auth.name,
+              role: auth.role,
+              action: 'package.import',
+              target: `${pkg.payload.kind}/${pkg.payload.name}@${pkg.payload.version}`,
+              meta: { format: pkg.format, filename, batch: true },
+              ip,
+            });
+            results.push({
+              ok: true,
+              format: pkg.format,
+              autoApproved: Boolean(published.autoApproved),
+              package: published.package,
+              version: publicVersion(published.version),
+            });
+          } catch (error) {
+            results.push({
+              ok: false,
+              format: pkg.format,
+              kind: pkg.payload.kind,
+              name: pkg.payload.name,
+              version: pkg.payload.version,
+              error: error.message,
+              details: error.details ?? null,
+            });
+          }
+        }
+        const failed = results.filter((item) => !item.ok);
+        if (dryRun) {
+          return sendJson(res, 200, { ok: failed.length === 0, dryRun: true, batch: true, format: built.format, results });
+        }
+        if (failed.length === results.length) {
+          throw unprocessable(`批量导入失败：${failed[0].error || '校验未通过'}`, { results });
+        }
+        return sendJson(res, failed.length ? 207 : 201, {
+          ok: failed.length === 0,
+          batch: true,
+          format: built.format,
+          results,
+          message: `已导入 ${results.length - failed.length}/${results.length} 个能力包`,
+        });
+      }
       if (query.get('dryRun') === '1') {
         const report = analyzeInput(built.payload, { scanBlock: config.scanBlock });
         return sendJson(res, 200, {

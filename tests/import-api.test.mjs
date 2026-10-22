@@ -117,6 +117,43 @@ test('文件夹上传：过滤后没有文件时返回清晰错误', async () =>
   assert.match(data.error.message, /没有可导入的文件/);
 });
 
+test('文件夹多套一层目录：自动剥离包装目录后识别', async () => {
+  const response = await fetch(`${server.url}/api/v1/import?filename=wrapper.json&version=0.1.6`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: 'my-skill/SKILL.md', content: SKILL_MD, encoding: 'utf8' },
+        { path: 'my-skill/notes.md', content: '# notes', encoding: 'utf8' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.package.kind, 'skill');
+  assert.equal(data.package.name, 'imported-skill');
+  assert.equal(data.version.files.length, 2);
+});
+
+test('文件夹包含多个能力包：批量导入并分别进入待审核', async () => {
+  const response = await fetch(`${server.url}/api/v1/import?filename=batch.json`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: 'skill-a/SKILL.md', content: '---\nname: batch-skill-a\ndescription: A\n---\n\n# A\n', encoding: 'utf8' },
+        { path: 'skill-b/SKILL.md', content: '---\nname: batch-skill-b\ndescription: B\n---\n\n# B\n', encoding: 'utf8' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.batch, true);
+  assert.equal(data.results.length, 2);
+  assert.ok(data.results.every((item) => item.ok));
+  assert.deepEqual(data.results.map((item) => item.package.name).sort(), ['batch-skill-a', 'batch-skill-b']);
+});
+
 test('dryRun：只预览不落库', async () => {
   const before = await fetch(`${server.url}/api/v1/packages?pageSize=100`).then((res) => res.json());
   const response = await fetch(`${server.url}/api/v1/import?dryRun=1&filename=dry.zip&name=dry-skill&version=0.1.0`, {

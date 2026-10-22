@@ -7,11 +7,14 @@ import {
   nowIso,
   sha256,
   compareVersions,
+  editDistanceLE,
 } from './util.mjs';
 import { createBackend } from './backend.mjs';
 import { KINDS, KIND_LABEL, isValidName, computeContentHash } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
 import { analyzeInput } from './pipeline.mjs';
+import { scanChanges, scanVerdict } from './scan.mjs';
+import { diffLines } from './diff.mjs';
 import { ensureDataLayout } from './config.mjs';
 import { badRequest, conflict, notFound, unprocessable } from './errors.mjs';
 import {
@@ -198,17 +201,96 @@ export function createStore(config, { audit, users, transparency, notifier } = {
     };
   }
 
+  /**
+   * 供应链层检查（需要库内上下文，单包扫描覆盖不到）：
+   *   1. 抢注嫌疑：与同 kind 已有包名编辑距离 ≤2 → SUP-001（中危 + 警告）
+   *   2. 更新突变：相对最新已有版本的「新增内容」做定向扫描 → SUP-002
+   *      （老版本干净、新版本引入高危行为是投放恶意更新的标准打法；
+   *        命中高危按 high 计入阈值判定，其余以中危提示人工比对 diff）
+   */
+  function supplyChainReview(bundle, pkg, tenant) {
+    const findings = [];
+    const warnings = [];
+
+    // 1) 抢注嫌疑（短包名噪声大，只对比 ≥5 字符的名字）
+    if (bundle.name.length >= 5) {
+      for (const other of Object.values(db.packages)) {
+        if (other.kind !== bundle.kind) continue;
+        if (other.name === bundle.name) continue;
+        if ((other.tenant || 'default') !== tenant) continue;
+        if (other.name.length < 5) continue;
+        if (editDistanceLE(other.name.toLowerCase(), bundle.name.toLowerCase(), 2)) {
+          findings.push({
+            ruleId: 'SUP-001',
+            severity: 'medium',
+            title: `包名与已有包 ${other.kind}/${other.name} 高度相似（疑似抢注）`,
+            file: '-',
+            line: 0,
+            snippet: `${bundle.name} ≈ ${other.name}`,
+          });
+          warnings.push(`包名 ${bundle.name} 与已有包 ${other.name} 高度相似，请人工确认不是抢注`);
+          if (findings.length >= 3) break;
+        }
+      }
+    }
+
+    // 2) 更新突变扫描（相对最新非 rejected 版本的新增内容）
+    let diff = null;
+    const latest = pkg?.versions
+      ? Object.keys(pkg.versions)
+          .filter((version) => pkg.versions[version].status !== 'rejected')
+          .sort(compareVersions)
+          .pop()
+      : null;
+    if (latest) {
+      try {
+        const oldBundle = rawBundle(bundle.kind, bundle.name, latest, tenant);
+        const oldByPath = new Map(oldBundle.files.map((file) => [file.path, file]));
+        const pieces = [];
+        for (const file of bundle.files) {
+          if (file.encoding !== 'utf8') continue;
+          const text = file.buf.toString('utf8');
+          const oldFile = oldByPath.get(file.path);
+          if (!oldFile) {
+            pieces.push({ path: file.path, text }); // 新增文件整篇
+          } else if (oldFile.encoding === 'utf8' && oldFile.content !== text) {
+            // 修改的文件只扫新增行
+            const result = diffLines(oldFile.content, text);
+            const added = result.lines.filter((line) => line.type === 'add').map((line) => line.text);
+            if (added.length > 0) pieces.push({ path: file.path, text: added.join('\n') });
+          }
+        }
+        if (pieces.length > 0) {
+          const result = scanChanges(pieces);
+          if (result.findings.length > 0) {
+            const hasHigh = result.summary.high > 0;
+            findings.push({
+              ruleId: 'SUP-002',
+              severity: hasHigh ? 'high' : 'medium',
+              title: `相对上一版本 ${latest} 新增内容命中扫描规则（更新突变检测）`,
+              file: pieces[0].path,
+              line: 0,
+              snippet: result.findings.map((finding) => finding.ruleId).slice(0, 6).join(', '),
+            });
+            warnings.push(
+              `与上一版本 ${latest} 相比新增内容命中 ${result.summary.total} 条扫描规则（高危 ${result.summary.high}），请重点比对 diff`,
+            );
+          }
+          diff = { base: latest, ...result };
+        }
+      } catch {
+        // 旧版本文件缺失等场景跳过 diff 检查，不阻塞发布
+      }
+    }
+
+    return { findings, warnings, diff };
+  }
+
   /** 发布：校验 + 扫描通过后进入待审核队列 */
   function publish(input, { actor = 'unknown', actorId = '', role = '', ip = '', tenant = 'default' } = {}) {
     const report = analyze(input);
     if (!report.valid) {
       throw unprocessable('能力包校验未通过', { errors: report.errors, warnings: report.warnings });
-    }
-    if (report.blocked && !(role === 'admin' && input?.overrideScan === true)) {
-      throw unprocessable('安全扫描命中高危规则，已阻止发布（管理员可带 overrideScan: true 覆盖）', {
-        scan: report.scan,
-        threshold: config.scanBlock,
-      });
     }
     const bundle = report.bundle;
     const pkgKey = keyOf(bundle.kind, bundle.name);
@@ -223,6 +305,28 @@ export function createStore(config, { audit, users, transparency, notifier } = {
     if (existing && existing.status === 'rejected') {
       fs.rmSync(versionDir(bundle.kind, bundle.name, bundle.version), { recursive: true, force: true });
       delete pkg.versions[bundle.version];
+    }
+
+    // 供应链层：抢注 + 更新突变。发现项并入扫描结果后再做阈值判定，
+    // 因此「更新引入高危」与普通高危一样会被阻断（管理员可覆盖）
+    const supply = supplyChainReview(bundle, pkg, tenant);
+    if (supply.findings.length > 0) {
+      report.scan.findings.push(...supply.findings);
+      report.scan.summary = {
+        high: report.scan.summary.high + supply.findings.filter((finding) => finding.severity === 'high').length,
+        medium: report.scan.summary.medium + supply.findings.filter((finding) => finding.severity === 'medium').length,
+        low: report.scan.summary.low + supply.findings.filter((finding) => finding.severity === 'low').length,
+        total: report.scan.summary.total + supply.findings.length,
+      };
+      if (supply.diff) report.scan.diff = supply.diff;
+    }
+    report.warnings.push(...supply.warnings);
+    report.blocked = report.valid && scanVerdict(report.scan, config.scanBlock).blocked;
+    if (report.blocked && !(role === 'admin' && input?.overrideScan === true)) {
+      throw unprocessable('安全扫描命中高危规则，已阻止发布（管理员可带 overrideScan: true 覆盖）', {
+        scan: report.scan,
+        threshold: config.scanBlock,
+      });
     }
     enforceQuota(tenant, pkgKey, bundle.kind, bundle.name, bundle.totalBytes);
 
