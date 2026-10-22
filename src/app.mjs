@@ -14,6 +14,8 @@ import { qualityOf } from './quality.mjs';
 import { createTransparencyLog } from './transparency.mjs';
 import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
 import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, PolicyError } from './policy.mjs';
+import { createSessionManager } from './session.mjs';
+import { createOidcClient } from './oidc.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
 
@@ -49,6 +51,9 @@ export function createApp(config = loadConfig()) {
   const store = createStore(config, { audit, users, transparency });
   const policyState = loadPolicy(config);
   store.setPolicy(policyState.policy);
+  const sessions = createSessionManager(config);
+  const oidc = createOidcClient(config);
+  const oidcStates = new Map(); // state -> { verifier, redirectUri, expiresAt }
 
   async function handle(req, res) {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -58,12 +63,93 @@ export function createApp(config = loadConfig()) {
     } catch {
       throw badRequest('URL 编码非法');
     }
-    const auth = users.authenticate(tokenFromRequest(req));
+    let auth = users.authenticate(tokenFromRequest(req));
+    if (!auth) {
+      const cookieValue = sessions.cookieFrom(req);
+      const payload = cookieValue ? sessions.verify(cookieValue) : null;
+      if (payload) {
+        const user = users.getUser(payload.uid);
+        if (user) {
+          auth = {
+            id: user.id,
+            name: user.name,
+            role: user.role,
+            tenant: user.tenant || 'default',
+            createdAt: user.createdAt,
+          };
+        }
+      }
+    }
     const ctx = {
       auth,
+      tenant: auth?.tenant || 'default',
       ip: req.socket?.remoteAddress || '',
       method: req.method || 'GET',
     };
+
+    if (pathname === '/auth/config') {
+      return sendJson(res, 200, {
+        ok: true,
+        enabled: oidc.settings.enabled,
+        issuer: oidc.settings.enabled ? oidc.settings.issuer : '',
+        loginUrl: oidc.settings.enabled ? '/auth/oidc/login' : '',
+      });
+    }
+
+    if (pathname === '/auth/oidc/login' && (req.method || 'GET') === 'GET') {
+      if (!oidc.settings.enabled) throw notFound('未配置 SSO（OIDC）');
+      const endpoints = await oidc.discover();
+      const redirectUri = oidc.settings.redirectUrl || `${config.publicUrl}/auth/oidc/callback`;
+      const state = oidc.createState();
+      const { verifier, challenge } = oidc.createPkcePair();
+      oidcStates.set(state, { verifier, redirectUri, expiresAt: Date.now() + 10 * 60 * 1000 });
+      for (const [key, value] of oidcStates) {
+        if (value.expiresAt < Date.now()) oidcStates.delete(key);
+      }
+      const location = oidc.authorizeUrl(endpoints, { state, codeChallenge: challenge, redirectUri });
+      res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+      return res.end();
+    }
+
+    if (pathname === '/auth/oidc/callback' && (req.method || 'GET') === 'GET') {
+      if (!oidc.settings.enabled) throw notFound('未配置 SSO（OIDC）');
+      const state = url.searchParams.get('state') || '';
+      const code = url.searchParams.get('code') || '';
+      const pending = oidcStates.get(state);
+      oidcStates.delete(state);
+      if (!pending || pending.expiresAt < Date.now()) throw badRequest('SSO state 无效或已过期');
+      if (!code) throw badRequest('SSO 回调缺少 code');
+      const endpoints = await oidc.discover();
+      const tokens = await oidc.exchangeCode(endpoints, {
+        code,
+        codeVerifier: pending.verifier,
+        redirectUri: pending.redirectUri,
+      });
+      if (!tokens.access_token) throw new AppError(502, 'OIDC_TOKEN_INVALID', 'OIDC token 响应缺少 access_token');
+      const claims = await oidc.userinfo(endpoints, tokens.access_token);
+      const identity = oidc.mapClaims(claims);
+      const user = users.provisionOidcUser(identity);
+      const secure = config.publicUrl.startsWith('https://');
+      audit.append({
+        actor: user.name,
+        role: user.role,
+        action: 'user.sso_login',
+        target: user.name,
+        meta: { tenant: user.tenant, issuer: oidc.settings.issuer },
+        ip: ctx.ip,
+      });
+      res.writeHead(302, {
+        Location: '/',
+        'Set-Cookie': sessions.cookieHeader(user.id, { secure }),
+        'Cache-Control': 'no-store',
+      });
+      return res.end();
+    }
+
+    if (pathname === '/auth/logout' && (req.method || 'GET') === 'POST') {
+      res.writeHead(204, { 'Set-Cookie': sessions.clearCookie(), 'Cache-Control': 'no-store' });
+      return res.end();
+    }
 
     if (pathname.startsWith('/api/')) {
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -78,6 +164,7 @@ export function createApp(config = loadConfig()) {
 
   async function handleApi(req, res, ctx, pathname, url) {
     const { auth, ip, method } = ctx;
+    const tenant = ctx.tenant || 'default';
     const route = pathname.replace(/^\/api\/v1\/?/, '');
     const requireAuth = () => {
       if (!auth) throw unauthorized('需要令牌，请提供 Authorization: Bearer <token>');
@@ -95,7 +182,7 @@ export function createApp(config = loadConfig()) {
     }
 
     if (route === 'stats' && method === 'GET') {
-      return sendJson(res, 200, store.stats());
+      return sendJson(res, 200, store.stats(tenant));
     }
 
     if (route === 'me' && method === 'GET') {
@@ -150,7 +237,7 @@ export function createApp(config = loadConfig()) {
       const name = url.searchParams.get('name') || '';
       const version = url.searchParams.get('version') || '';
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
-      const versionDoc = store.getVersion(kind, name, version);
+      const versionDoc = store.getVersion(kind, name, version, tenant);
       if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
       const result = transparency.proof(kind, name, version);
@@ -234,7 +321,7 @@ export function createApp(config = loadConfig()) {
           verdict: report.verdict,
         });
       }
-      const result = store.publish(payload, { actor: auth.name, actorId: auth.id, role: auth.role, ip });
+      const result = store.publish(payload, { actor: auth.name, actorId: auth.id, role: auth.role, ip, tenant });
       audit.append({
         actor: auth.name,
         role: auth.role,
@@ -283,6 +370,7 @@ export function createApp(config = loadConfig()) {
         kind: url.searchParams.get('kind') || '',
         status: status === 'all' ? '' : status,
         includePending,
+        tenant,
       });
       const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
       const pageSize = Math.min(
@@ -303,7 +391,7 @@ export function createApp(config = loadConfig()) {
     if (route === 'packages' && method === 'POST') {
       requireRole('publisher');
       const body = await readBody(req);
-      const result = store.publish(body, { actor: auth.name, actorId: auth.id, role: auth.role, ip });
+      const result = store.publish(body, { actor: auth.name, actorId: auth.id, role: auth.role, ip, tenant });
       return sendJson(res, 201, {
         ok: true,
         autoApproved: Boolean(result.autoApproved),
@@ -319,13 +407,13 @@ export function createApp(config = loadConfig()) {
       const includePending = Boolean(
         auth && (auth.role === 'reviewer' || auth.role === 'admin'),
       );
-      return sendJson(res, 200, store.packageDetail(kind, name, { includePending }));
+      return sendJson(res, 200, store.packageDetail(kind, name, { includePending, tenant }));
     }
 
     const versionMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)$/);
     if (versionMatch && method === 'GET') {
       const [, kind, name, version] = versionMatch;
-      const versionDoc = store.getVersion(kind, name, version);
+      const versionDoc = store.getVersion(kind, name, version, tenant);
       if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
@@ -338,7 +426,7 @@ export function createApp(config = loadConfig()) {
     );
     if (signatureMatch && method === 'GET') {
       const [, kind, name, version] = signatureMatch;
-      const versionDoc = store.getVersion(kind, name, version);
+      const versionDoc = store.getVersion(kind, name, version, tenant);
       if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
@@ -368,11 +456,11 @@ export function createApp(config = loadConfig()) {
     const sbomMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)\/sbom$/);
     if (sbomMatch && method === 'GET') {
       const [, kind, name, version] = sbomMatch;
-      const versionDoc = store.getVersion(kind, name, version);
+      const versionDoc = store.getVersion(kind, name, version, tenant);
       if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
-      const sbom = store.sbom(kind, name, versionDoc.version);
+      const sbom = store.sbom(kind, name, versionDoc.version, tenant);
       if (!sbom) throw notFound('该版本没有 SBOM');
       return sendJson(res, 200, { ok: true, sbom });
     }
@@ -381,7 +469,7 @@ export function createApp(config = loadConfig()) {
     const bundleMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)\/bundle$/);
     if (bundleMatch && method === 'GET') {
       const [, kind, name, version] = bundleMatch;
-      let versionDoc = store.getVersion(kind, name, version);
+      let versionDoc = store.getVersion(kind, name, version, tenant);
       if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布');
@@ -395,7 +483,7 @@ export function createApp(config = loadConfig()) {
       const [, kind, name, version] = fileMatch;
       const filePath = url.searchParams.get('path');
       if (!filePath) throw badRequest('缺少 path 查询参数');
-      return sendJson(res, 200, { ok: true, file: store.fileContent(kind, name, version, filePath) });
+      return sendJson(res, 200, { ok: true, file: store.fileContent(kind, name, version, filePath, tenant) });
     }
 
     // 版本差异（审核 diff 视图）：默认与上一个已发布版本对比
@@ -403,11 +491,11 @@ export function createApp(config = loadConfig()) {
     if (diffMatch && method === 'GET') {
       const [, kind, name] = diffMatch;
       const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
-      const detail = store.packageDetail(kind, name, { includePending: privileged });
+      const detail = store.packageDetail(kind, name, { includePending: privileged, tenant });
       const requestedTo = url.searchParams.get('to');
       const toVersion = requestedTo || detail.versions[0]?.version || null;
       if (!toVersion) throw notFound('该包还没有可比对的版本');
-      const toDoc = store.getVersion(kind, name, toVersion);
+      const toDoc = store.getVersion(kind, name, toVersion, tenant);
       if (!toDoc) throw notFound(`版本不存在：${kind}/${name}@${toVersion}`);
       if (toDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
       let fromVersion = url.searchParams.get('from');
@@ -419,13 +507,13 @@ export function createApp(config = loadConfig()) {
       }
       let fromDoc = null;
       if (fromVersion) {
-        fromDoc = store.getVersion(kind, name, fromVersion);
+        fromDoc = store.getVersion(kind, name, fromVersion, tenant);
         if (!fromDoc) throw notFound(`基线版本不存在：${fromVersion}`);
         if (fromDoc.status !== 'published' && !privileged) throw notFound('基线版本不可见');
       }
       const result = diffBundles(
-        fromDoc ? store.rawBundle(kind, name, fromDoc.version) : { files: [] },
-        store.rawBundle(kind, name, toDoc.version),
+        fromDoc ? store.rawBundle(kind, name, fromDoc.version, tenant) : { files: [] },
+        store.rawBundle(kind, name, toDoc.version, tenant),
       );
       return sendJson(res, 200, {
         ok: true,
@@ -458,8 +546,8 @@ export function createApp(config = loadConfig()) {
       if (!body || typeof body.kind !== 'string' || typeof body.name !== 'string') {
         throw badRequest('需要 kind 与 name');
       }
-      const versionDoc = store.requirePublished(body.kind, body.name, body.version || undefined);
-      const bundle = store.bundleContent(body.kind, body.name, versionDoc.version);
+      const versionDoc = store.requirePublished(body.kind, body.name, body.version || undefined, tenant);
+      const bundle = store.bundleContent(body.kind, body.name, versionDoc.version, tenant);
       const plan = planInstall(bundle, {
         target: body.target || 'dsh',
         home: config.home,
@@ -478,7 +566,7 @@ export function createApp(config = loadConfig()) {
     // 审核队列
     if (route === 'review/queue' && method === 'GET') {
       requireRole('reviewer');
-      return sendJson(res, 200, store.reviewQueue());
+      return sendJson(res, 200, store.reviewQueue(tenant));
     }
 
     // 审核动作
@@ -487,6 +575,10 @@ export function createApp(config = loadConfig()) {
       const body = await readBody(req);
       if (!body || typeof body.kind !== 'string' || typeof body.name !== 'string' || typeof body.version !== 'string') {
         throw badRequest('需要 kind / name / version');
+      }
+      const existing = store.getVersion(body.kind, body.name, body.version);
+      if (existing && (existing.tenant || 'default') !== tenant) {
+        throw notFound(`版本不存在：${body.kind}/${body.name}@${body.version}`);
       }
       const versionDoc = store.review(body.kind, body.name, body.version, {
         decision: body.decision,
@@ -563,13 +655,13 @@ export function createApp(config = loadConfig()) {
       if (!body || typeof body.name !== 'string' || typeof body.role !== 'string') {
         throw badRequest('需要 name 与 role');
       }
-      const created = users.createToken({ name: body.name, role: body.role });
+      const created = users.createToken({ name: body.name, role: body.role, tenant: body.tenant });
       audit.append({
         actor: auth.name,
         role: auth.role,
         action: 'user.create_token',
         target: body.name,
-        meta: { role: body.role },
+        meta: { role: body.role, tenant: created.user.tenant },
         ip,
       });
       return sendJson(res, 201, { ok: true, token: created.token, user: created.user, roleLabels: ROLE_LABEL });

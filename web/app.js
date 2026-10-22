@@ -145,12 +145,14 @@ function renderAuth() {
   const slot = $('#auth-slot');
   slot.replaceChildren();
   if (state.user) {
+    const roleText = ROLE_LABEL[state.user.role] || state.user.role;
+    const tenantText = state.user.tenant && state.user.tenant !== 'default' ? ` · ${state.user.tenant}` : '';
     slot.append(
       h(
         'span',
         { class: 'user-chip' },
         h('span', {}, state.user.name),
-        h('span', { class: 'role' }, `${ROLE_LABEL[state.user.role] || state.user.role}`),
+        h('span', { class: 'role' }, `${roleText}${tenantText}`),
       ),
       h('button', { class: 'btn', type: 'button', onClick: logout }, '退出'),
     );
@@ -165,6 +167,12 @@ function renderAuth() {
   });
   input.value = state.token || '';
   slot.append(input, h('button', { class: 'btn btn-primary', type: 'button', onClick: login }, '登录'));
+  if (state.oidcEnabled) {
+    slot.append(
+      h('a', { class: 'btn', href: '/auth/oidc/login' }, 'SSO 登录'),
+      h('span', { class: 'hint' }, '使用组织账号登录（OIDC）'),
+    );
+  }
 }
 
 async function login() {
@@ -186,7 +194,14 @@ async function login() {
   }
 }
 
-function logout() {
+async function logout() {
+  if (!state.token) {
+    try {
+      await fetch('/auth/logout', { method: 'POST' });
+    } catch {
+      /* 忽略 */
+    }
+  }
   state.token = '';
   state.user = null;
   localStorage.removeItem('agentdock.token');
@@ -1328,6 +1343,19 @@ async function init() {
       state.token = '';
       localStorage.removeItem('agentdock.token');
     }
+  } else {
+    // 无 Bearer 令牌时尝试复用 SSO 会话 Cookie
+    try {
+      await loadMe();
+    } catch {
+      /* 未登录 */
+    }
+  }
+  try {
+    const config = await (await fetch('/auth/config')).json();
+    state.oidcEnabled = Boolean(config.enabled);
+  } catch {
+    state.oidcEnabled = false;
   }
   renderAuth();
   updateTabs();

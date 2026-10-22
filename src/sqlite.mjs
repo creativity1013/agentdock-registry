@@ -65,6 +65,7 @@ function openDatabase(file) {
     CREATE TABLE IF NOT EXISTS packages (
       kind TEXT NOT NULL,
       name TEXT NOT NULL,
+      tenant TEXT NOT NULL DEFAULT 'default',
       description TEXT,
       tags TEXT NOT NULL DEFAULT '[]',
       created_at TEXT,
@@ -99,10 +100,17 @@ export function createSqliteBackend(config) {
   let closed = false;
   let migratedFromDbJson = false;
 
+  // 旧库迁移：补 tenant 列（v0.1 之前没有多租户）
+  const packageColumns = db.prepare('PRAGMA table_info(packages)').all().map((row) => row.name);
+  if (!packageColumns.includes('tenant')) {
+    db.exec("ALTER TABLE packages ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'");
+  }
+
   const insertPackage = db.prepare(`
-    INSERT INTO packages (kind, name, description, tags, created_at, created_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO packages (kind, name, tenant, description, tags, created_at, created_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (kind, name) DO UPDATE SET
+      tenant = excluded.tenant,
       description = excluded.description,
       tags = excluded.tags,
       updated_at = excluded.updated_at
@@ -143,6 +151,7 @@ export function createSqliteBackend(config) {
         insertPackage.run(
           pkg.kind,
           pkg.name,
+          pkg.tenant ?? 'default',
           pkg.description ?? '',
           JSON.stringify(pkg.tags ?? []),
           pkg.createdAt ?? '',
@@ -166,6 +175,7 @@ export function createSqliteBackend(config) {
     return {
       kind: pkg.kind,
       name: pkg.name,
+      tenant: pkg.tenant ?? 'default',
       description: pkg.description ?? '',
       tags: Array.isArray(pkg.tags) ? pkg.tags : [],
       createdAt: pkg.createdAt ?? '',
@@ -180,12 +190,13 @@ export function createSqliteBackend(config) {
     migratedFromDbJson = Boolean(migrated);
     state.packages = {};
     const packageRows = db
-      .prepare('SELECT kind, name, description, tags, created_at, created_by, updated_at FROM packages')
+      .prepare('SELECT kind, name, tenant, description, tags, created_at, created_by, updated_at FROM packages')
       .all();
     for (const row of packageRows) {
       state.packages[`${row.kind}/${row.name}`] = {
         kind: row.kind,
         name: row.name,
+        tenant: row.tenant ?? 'default',
         description: row.description ?? '',
         tags: parseTags(row.tags),
         createdAt: row.created_at ?? '',
@@ -218,6 +229,7 @@ export function createSqliteBackend(config) {
       insertPackage.run(
         pkg.kind,
         pkg.name,
+        pkg.tenant ?? 'default',
         pkg.description ?? '',
         JSON.stringify(pkg.tags ?? []),
         pkg.createdAt ?? '',
@@ -266,9 +278,13 @@ export function createSqliteBackend(config) {
   }
 
   /** 列表查询下推：过滤在 SQL 完成，版本 semver 排序在调用方用 JS 处理 */
-  function queryPackages({ q = '', kind = '', status = 'published', includePending = false } = {}) {
+  function queryPackages({ q = '', kind = '', status = 'published', includePending = false, tenant = '' } = {}) {
     const clauses = [];
     const params = [];
+    if (tenant) {
+      clauses.push('p.tenant = ?');
+      params.push(tenant);
+    }
     if (kind) {
       clauses.push('p.kind = ?');
       params.push(kind);
@@ -291,7 +307,7 @@ export function createSqliteBackend(config) {
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = db
       .prepare(
-        `SELECT p.kind, p.name, p.description, p.tags, v.version, v.status, v.payload
+        `SELECT p.kind, p.name, p.tenant, p.description, p.tags, v.version, v.status, v.payload
            FROM packages p
            JOIN versions v ON v.kind = p.kind AND v.name = p.name
            ${where}
@@ -302,21 +318,30 @@ export function createSqliteBackend(config) {
   }
 
   /** 统计下推：计数与安装量由 SQL 聚合 */
-  function queryStats() {
+  function queryStats(tenant = '') {
     const count = (sql, ...params) => Number(db.prepare(sql).get(...params).n || 0);
+    const hasTenant = Boolean(tenant);
+    const where = hasTenant ? ' WHERE tenant = ?' : '';
+    const args = hasTenant ? [tenant] : [];
+    const versionFrom = hasTenant
+      ? ' FROM versions v JOIN packages p ON p.kind = v.kind AND p.name = v.name WHERE p.tenant = ?'
+      : ' FROM versions v';
     const result = {
-      packages: count('SELECT COUNT(*) AS n FROM packages'),
-      versions: count('SELECT COUNT(*) AS n FROM versions'),
+      packages: count(`SELECT COUNT(*) AS n FROM packages${where}`, ...args),
+      versions: count(`SELECT COUNT(*) AS n${versionFrom}`, ...args),
       pending: 0,
       published: 0,
       rejected: 0,
-      installs: count("SELECT COALESCE(SUM(json_extract(payload, '$.installs')), 0) AS n FROM versions"),
+      installs: count(
+        `SELECT COALESCE(SUM(json_extract(v.payload, '$.installs')), 0) AS n${versionFrom}`,
+        ...args,
+      ),
       byKind: { skill: 0, agent: 0, plugin: 0 },
     };
-    for (const row of db.prepare('SELECT status, COUNT(*) AS n FROM versions GROUP BY status').all()) {
+    for (const row of db.prepare(`SELECT v.status, COUNT(*) AS n${versionFrom} GROUP BY v.status`).all(...args)) {
       result[row.status] = (result[row.status] || 0) + Number(row.n);
     }
-    for (const row of db.prepare('SELECT kind, COUNT(*) AS n FROM packages GROUP BY kind').all()) {
+    for (const row of db.prepare(`SELECT kind, COUNT(*) AS n FROM packages${where} GROUP BY kind`).all(...args)) {
       result.byKind[row.kind] = (result.byKind[row.kind] || 0) + Number(row.n);
     }
     return result;

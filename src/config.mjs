@@ -53,6 +53,19 @@ export function loadConfig(env = process.env, overrides = {}) {
     throw new Error(`AGENTDOCK_AUDIT_KEEP 不合法：${env.AGENTDOCK_AUDIT_KEEP}`);
   }
 
+  const oidcIssuer = String(overrides.oidc?.issuer ?? env.AGENTDOCK_OIDC_ISSUER ?? '').trim();
+  const oidcClientId = String(overrides.oidc?.clientId ?? env.AGENTDOCK_OIDC_CLIENT_ID ?? '').trim();
+  const oidcClientSecret = String(overrides.oidc?.clientSecret ?? env.AGENTDOCK_OIDC_CLIENT_SECRET ?? '').trim();
+  const oidcRedirect = String(
+    overrides.oidc?.redirectUrl ?? env.AGENTDOCK_OIDC_REDIRECT ?? '',
+  ).trim();
+  const oidcDefaultRole = String(
+    overrides.oidc?.defaultRole ?? env.AGENTDOCK_OIDC_DEFAULT_ROLE ?? 'viewer',
+  ).trim();
+  if (!['viewer', 'publisher', 'reviewer', 'admin'].includes(oidcDefaultRole)) {
+    throw new Error(`AGENTDOCK_OIDC_DEFAULT_ROLE 不合法：${oidcDefaultRole}`);
+  }
+
   const config = {
     host,
     port,
@@ -69,6 +82,17 @@ export function loadConfig(env = process.env, overrides = {}) {
       backend,
       sqliteFile: path.join(dataDir, 'agentdock.sqlite'),
     },
+    oidc: {
+      enabled: Boolean(oidcIssuer && oidcClientId),
+      issuer: oidcIssuer.replace(/\/+$/, ''),
+      clientId: oidcClientId,
+      clientSecret: oidcClientSecret,
+      redirectUrl: oidcRedirect,
+      scopes: String(overrides.oidc?.scopes ?? env.AGENTDOCK_OIDC_SCOPES ?? 'openid profile email'),
+      tenantClaim: String(overrides.oidc?.tenantClaim ?? env.AGENTDOCK_OIDC_TENANT_CLAIM ?? 'tenant'),
+      roleClaim: String(overrides.oidc?.roleClaim ?? env.AGENTDOCK_OIDC_ROLE_CLAIM ?? 'role'),
+      defaultRole: oidcDefaultRole,
+    },
     audit: {
       maxBytes: auditMaxBytes,
       keep: auditKeep,
@@ -84,6 +108,7 @@ export function loadConfig(env = process.env, overrides = {}) {
       signingKey: path.join(dataDir, 'signing-key.json'),
       transparency: path.join(dataDir, 'transparency.log'),
       policy: path.join(dataDir, 'policy.json'),
+      sessionSecret: path.join(dataDir, 'session-secret.json'),
     },
   };
   return config;

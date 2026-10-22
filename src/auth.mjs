@@ -35,6 +35,7 @@ export function createUserDirectory(config) {
         id: `u_${sha256(seed.name).slice(0, 8)}`,
         name: seed.name,
         role: seed.role,
+        tenant: 'default',
         tokenHash: sha256(token),
         createdAt: nowIso(),
       };
@@ -51,41 +52,118 @@ export function createUserDirectory(config) {
     fs.writeFileSync(bootstrapFile, lines.join('\n'), { mode: 0o600 });
     bootstrap = plaintext;
   } else {
-    state.users = state.users.map((user) => ({ role: 'viewer', ...user, keys: Array.isArray(user.keys) ? user.keys : [] }));
+    state.users = state.users.map((user) => ({
+      role: 'viewer',
+      tenant: 'default',
+      ...user,
+      tenant: user.tenant || 'default',
+      keys: Array.isArray(user.keys) ? user.keys : [],
+    }));
   }
 
   function authenticate(token) {
     if (!token || typeof token !== 'string') return null;
     const hash = sha256(token);
     for (const user of state.users) {
+      if (!user.tokenHash) continue;
       if (safeEqual(hash, user.tokenHash)) {
-        return { id: user.id, name: user.name, role: user.role, createdAt: user.createdAt };
+        return {
+          id: user.id,
+          name: user.name,
+          role: user.role,
+          tenant: user.tenant || 'default',
+          createdAt: user.createdAt,
+        };
       }
     }
     return null;
   }
 
   function list() {
-    return state.users.map((user) => ({ id: user.id, name: user.name, role: user.role, createdAt: user.createdAt }));
+    return state.users.map((user) => ({
+      id: user.id,
+      name: user.name,
+      role: user.role,
+      tenant: user.tenant || 'default',
+      auth: user.auth || 'token',
+      email: user.email || '',
+      createdAt: user.createdAt,
+    }));
   }
 
-  function createToken({ name, role }) {
+  function createToken({ name, role, tenant = 'default' }) {
     if (typeof name !== 'string' || name.trim() === '') throw badRequest('name 不能为空');
     if (!ROLES.includes(role)) throw badRequest(`role 必须是 ${ROLES.join(' / ')} 之一`);
     if (state.users.some((user) => user.name === name.trim())) {
       throw badRequest(`用户名已存在：${name.trim()}`);
+    }
+    if (typeof tenant !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(tenant)) {
+      throw badRequest('tenant 只能是小写字母/数字/下划线/连字符，最长 32 位');
     }
     const token = randomToken(24);
     const user = {
       id: `u_${randomToken(6)}`,
       name: name.trim(),
       role,
+      tenant,
+      auth: 'token',
       tokenHash: sha256(token),
       createdAt: nowIso(),
     };
     state.users.push(user);
     writeJsonAtomic(usersFile, state);
-    return { user: { id: user.id, name: user.name, role: user.role, createdAt: user.createdAt }, token };
+    return {
+      user: { id: user.id, name: user.name, role: user.role, tenant: user.tenant, createdAt: user.createdAt },
+      token,
+    };
+  }
+
+  /** SSO 用户：按 OIDC sub / email 复用已有账号，否则自动创建（默认 role 由配置决定） */
+  function provisionOidcUser({ subject, email = '', name = '', tenant = 'default', role = 'viewer' }) {
+    const existing = state.users.find(
+      (user) => (user.oidcSub && user.oidcSub === subject) || (email && user.email === email),
+    );
+    if (existing) {
+      existing.oidcSub = existing.oidcSub || subject;
+      if (email) existing.email = email;
+      existing.lastLoginAt = nowIso();
+      writeJsonAtomic(usersFile, state);
+      return {
+        id: existing.id,
+        name: existing.name,
+        role: existing.role,
+        tenant: existing.tenant || 'default',
+        email: existing.email || '',
+        createdAt: existing.createdAt,
+      };
+    }
+    let username = (name || email || subject || 'sso-user').slice(0, 64);
+    if (state.users.some((user) => user.name === username)) {
+      username = `${username}-${sha256(subject).slice(0, 4)}`;
+    }
+    const user = {
+      id: `u_${randomToken(6)}`,
+      name: username,
+      role: ['viewer', 'publisher', 'reviewer', 'admin'].includes(role) ? role : 'viewer',
+      tenant,
+      auth: 'oidc',
+      email,
+      oidcSub: subject,
+      tokenHash: null,
+      keys: [],
+      createdAt: nowIso(),
+      lastLoginAt: nowIso(),
+    };
+    state.users.push(user);
+    writeJsonAtomic(usersFile, state);
+    return {
+      id: user.id,
+      name: user.name,
+      role: user.role,
+      tenant: user.tenant,
+      email,
+      createdAt: user.createdAt,
+    };
   }
 
   /* ------------------------------ 发布者签名密钥 ------------------------------ */
@@ -171,6 +249,8 @@ export function createUserDirectory(config) {
     removeKey,
     findKey,
     keysOf,
+    getUser,
+    provisionOidcUser,
     requireRole,
     get count() {
       return state.users.length;

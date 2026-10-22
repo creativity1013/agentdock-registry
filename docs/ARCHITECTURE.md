@@ -122,6 +122,7 @@ data/
     "skill/demo-skill": {
       "kind": "skill",
       "name": "demo-skill",
+      "tenant": "default",            // 发布者所属租户；不同租户可同名
       "description": "……",
       "tags": ["demo"],
       "latestVersion": "0.1.0",
@@ -156,7 +157,17 @@ data/
 {
   "schemaVersion": 1,
   "users": [
-    { "id": "u_…", "name": "admin", "role": "admin", "tokenHash": "sha256(明文令牌)", "createdAt": "…" }
+    {
+      "id": "u_…",
+      "name": "admin",
+      "role": "admin",
+      "tenant": "default",         // 多租户归属（默认 default）
+      "tokenHash": "sha256(明文令牌)", // OIDC 账号为 null
+      "auth": "token",             // token | oidc
+      "email": "…",                // OIDC 账号可选
+      "createdAt": "…",
+      "keys": []                   // 发布者公钥（TOFU 注册）
+    }
   ]
 }
 ```
@@ -255,13 +266,15 @@ data/
 | `src/policy.mjs` | 自动审批策略：归一化/校验/规则求值/读写 | `normalizePolicy`、`evaluateAutoApproval`、`loadPolicy`、`savePolicy`、`defaultPolicy` |
 | `src/backend.mjs` | 元数据后端选择与统一接口（json / sqlite） | `createBackend`、`describeBackends`、`BACKEND_KINDS` |
 | `src/sqlite.mjs` | `node:sqlite` 后端：关系表 + WAL + db.json 自动迁移 | `createSqliteBackend`、`sqliteAvailable`、`SQLITE_SCHEMA_VERSION` |
-| `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf`）、`tokenFromRequest` |
+| `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 + OIDC 账号开通 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf/getUser/provisionOidcUser`）、`tokenFromRequest` |
+| `src/session.mjs` | 会话 Cookie：HMAC-SHA256 签名、8h 过期、安全属性集中定义 | `createSessionManager`（`sign/verify/cookieFrom/cookieHeader/clearCookie`）、`SESSION_COOKIE` |
+| `src/oidc.mjs` | OIDC discovery + PKCE 授权码流程（零依赖，身份以 userinfo 为准） | `createOidcClient`（`discover/createPkcePair/createState/authorizeUrl/exchangeCode/userinfo/mapClaims/loginUrl`） |
 | `src/audit.mjs` | 审计日志（哈希链 + 过滤 + 校验 + 导出 + 轮转） | `createAuditLog`（`append/read/verify/exportLines`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
 | `cli/agentdock.mjs` | 命令行、本地校验、导入器 | — |
 
-依赖方向：`cli / server → app → store / targets / pipeline / diff / registry / policy / sbom → bundle / validate / scan → backend（json / sqlite）→ yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
+依赖方向：`cli / server → app → store / targets / pipeline / diff / registry / policy / sbom / session / oidc → bundle / validate / scan → backend（json / sqlite）→ yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
 
 ## 5. 安全模型
 
@@ -276,6 +289,7 @@ data/
 9. **可验证透明日志**：审核通过时向 `transparency.log` 追加哈希链事件（contentHash、发布者、平台/发布者 keyId、审核人），事件哈希构造 RFC 6962 风格 Merkle 树；`/transparency/verify` 校验整链，`/transparency/proof` 返回包含证明，CLI 使用 `verifyInclusionProof` 本地校验。`audit.log` 面向运维（含 IP/角色；自己的哈希链只用于内部防篡改校验，无 Merkle/公开证明），`transparency.log` 面向外部可复核（不含敏感字段）。
 10. **外部 registry 导入**（`registry.mjs`）：只从服务端配置的 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY` 读取，请求体不接受任意 URL（防 SSRF）；单次 200 文件 / 单文件 512KB / 总量 2MB、15s 超时；外部内容一律走同一 normalize → validate → scan 流水线，导入后为 `pending`，必须审核才能上架；导入操作需 publisher 权限并记录审计 `sync.import`。
 11. **SBOM 与自动审批**：每个版本生成 `agentdock-sbom@1`（文件哈希 + 声明的工具/MCP/技能组件 + 可复现 digest），供审核与供应链比对；自动审批默认关闭，开启后仅对策略白名单内、无高危、体积达标且（可选）带发布者签名的版本生效，自动通过的版本同样有平台签名、透明日志与审计，未通过记录失败规则，保证「放宽人工审核」不牺牲可追溯性。
+12. **SSO 与多租户**：OIDC Authorization Code + PKCE，无本地 JWT 验签（信任 userinfo 端点，需 HTTPS 可达）；登录后发 HMAC 签名 Cookie（8h），不落服务端会话表。租户由令牌/`tenant` claim 绑定，发布时写入版本 `tenant`；市场列表/统计/详情/审核队列/diff/SBOM/透明证明查询按租户过滤，跨租户一律 404，同名包允许跨租户并存（`kind/name` + `tenant` 区分）。审计与透明日志保持全局视图，会话失效依赖过期/重启。
 
 ## 6. 安装目标模型
 
@@ -363,7 +377,8 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 - **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency / registry / sbom / policy——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖；另覆盖策略更新权限、自动审批上架、SBOM 接口与版本详情 SBOM 摘要。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
-- **存储后端测试**（`tests/sqlite.test.mjs`）：Node 24 上验证 SQLite 后端的发布/审核/安装持久化、重启恢复、db.json → sqlite 自动迁移与后端选择；Node 20/22 自动 skip。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。
+- **存储后端测试**（`tests/sqlite.test.mjs`）：Node 24 上验证 SQLite 后端的发布/审核/安装持久化、重启恢复、db.json → sqlite 自动迁移与后端选择；Node 20/22 自动 skip。
+- **认证与多租户测试**（`tests/sso.test.mjs` / `tests/tenant.test.mjs`）：本地 mock OIDC（discovery/token/userinfo）验证 PKCE 登录、Cookie 会话与自动建号；多租户验证列表/详情/审核队列/统计隔离、跨租户 404 与同名冲突、非法租户名拒绝。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果；`smoke:sqlite` 用 SQLite 后端跑同一套。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。
 
@@ -447,7 +462,24 @@ load() -> state | savePackage(pkgKey, pkg) | saveVersion(pkgKey, versionDoc) | c
 - **列表/搜索/统计下推**：SQLite 模式下列表用 `queryPackages()`（SQL 过滤 kind/status/关键词）、统计用 `queryStats()`（SQL 聚合），`store.listPackages/stats` 优先走这些方法；版本 semver 排序与分页仍在 JS 完成。JSON 后端保持原内存实现，两条路径有对照测试保证语义一致。
 - **取舍**：启动时仍把全部元数据读入内存（详情、写入、审核需要随机访问）；SQLite 解决持久化可靠性、写入成本与规模上限，列表/搜索已下推。若要百万级包再考虑详情/审核也改为按需查询或换外部数据库。`node:sqlite` 在 Node 24 仍标记 experimental（启动有警告），因此默认后端保持 json，CI 在 Node 24 上单独验证 sqlite。
 
-## 13. 部署形态
+## 13. 认证与多租户（OIDC SSO）
+
+```
+浏览器 ──GET /auth/oidc/login──▶ 302 IdP authorize（state + code_challenge=PKCE-S256）
+IdP ──redirect /auth/oidc/callback?code=&state=──▶ 服务端
+服务端 ──POST token（code + code_verifier）──▶ IdP
+      ──GET userinfo（Bearer access_token）──▶ IdP
+      ──provisionOidcUser(sub/email/name + tenant/role claim)──▶ users.json
+      ──Set-Cookie: agentdock_session=<HMAC 签名>（HttpOnly/SameSite=Lax/8h）──▶ 302 /
+```
+
+- **配置**：`AGENTDOCK_OIDC_ISSUER` + `AGENTDOCK_OIDC_CLIENT_ID` 即启用（可选 secret、redirect、defaultRole、tenantClaim、roleClaim）；未配置时 `/auth/*` 返回 404，仅 Bearer 令牌可用。
+- **会话**：`session-secret.json` 首次启动生成（600）；Cookie 载荷 `{uid, exp}` + HMAC-SHA256，`verify` 用 `crypto.timingSafeEqual`；服务端无会话表，改密/禁用账号需等过期或重启。
+- **账号开通**：按 `sub`（或 email）匹配已有用户，否则以默认角色创建 `auth:'oidc'` 账号；已存在用户的角色/租户由 admin 在 `users.json` / `POST /admin/tokens` 管理，登录不覆盖。
+- **多租户**：`publish` 从 `ctx.tenant` 写入 `pkg.tenant` 与 `version.tenant`；读路径统一传 `tenant`（存储层过滤），JSON 与 SQLite 后端语义一致（`packages.tenant` 列 + `ALTER TABLE` 迁移旧库）；跨租户读写 404，跨租户同名发布 409。统计 SQL 通过 `versions JOIN packages` 按租户聚合。
+- **边界**：不隔离审计/透明日志（全局只读）；不做租户配额；OIDC 依赖外部 IdP 可用性；无内置 TLS。
+
+## 14. 部署形态
 
 | 形态 | 入口 | 说明 |
 | --- | --- | --- |

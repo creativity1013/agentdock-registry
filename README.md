@@ -316,7 +316,7 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 
 ## HTTP API
 
-所有接口前缀 `/api/v1`，认证方式 `Authorization: Bearer <token>`（也支持 `x-agentdock-token`）。
+所有接口前缀 `/api/v1`，认证方式 `Authorization: Bearer <token>`（也支持 `x-agentdock-token`）；启用 SSO 时也可使用登录后的会话 Cookie（`agentdock_session`，见下文「SSO 登录与多租户」）。
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
@@ -355,7 +355,7 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | GET | `/audit/verify` | reviewer | 校验审计哈希链（`?all=1` 含归档；断链返回 409 与断链位置） |
 | GET | `/audit/export` | reviewer | 导出审计（`format=csv\|jsonl`，过滤参数同 `/audit`，时间正序） |
 | GET | `/admin/users` | admin | 用户列表 |
-| POST | `/admin/tokens` | admin | 创建令牌 `{name,role}` |
+| POST | `/admin/tokens` | admin | 创建令牌 `{name,role,tenant}`（`tenant` 缺省为 `default`） |
 
 发布请求体即能力包 JSON：
 
@@ -392,6 +392,13 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | `AGENTDOCK_MCP_REGISTRY` | `https://registry.modelcontextprotocol.io` | 外部同步使用的 MCP registry 基地址 |
 | `GITHUB_TOKEN` | — | 可选，提高 GitHub API 速率上限并访问私有仓库 |
 | `AGENTDOCK_STORE` | `json` | 元数据后端：`json`（`data/db.json`）或 `sqlite`（`data/agentdock.sqlite`，需 Node 24+ 的 `node:sqlite`） |
+| `AGENTDOCK_OIDC_ISSUER` | — | 启用 SSO 时必填：OIDC Issuer（如 `https://idp.example.com`），用于发现端点 |
+| `AGENTDOCK_OIDC_CLIENT_ID` | — | OIDC Client ID |
+| `AGENTDOCK_OIDC_CLIENT_SECRET` | — | OIDC Client Secret（可选，公开客户端可留空） |
+| `AGENTDOCK_OIDC_REDIRECT` | `<PUBLIC_URL>/auth/oidc/callback` | OIDC 回调地址（需在 IdP 注册一致） |
+| `AGENTDOCK_OIDC_DEFAULT_ROLE` | `viewer` | 新账号默认角色：`viewer/publisher/reviewer/admin` |
+| `AGENTDOCK_OIDC_TENANT_CLAIM` | `tenant` | 用户信息中表示租户的 claim 名 |
+| `AGENTDOCK_OIDC_ROLE_CLAIM` | `role` | 用户信息中表示角色的 claim 名（须为合法角色） |
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
@@ -503,6 +510,23 @@ AGENTDOCK_STORE=sqlite npm start
 - 备份：`data/` 目录（含 `agentdock.sqlite` 及其 `-wal`/`-shm`）整体备份；SQLite 模式下建议停服或用 `sqlite3 .backup`。
 - 测试：`npm run test:sqlite`、`npm run smoke:sqlite`（CI 在 Node 24 矩阵上执行）。
 
+## SSO 登录与多租户
+
+AgentDock 支持用外部 OIDC（Keycloak / Okta / Entra ID / Auth0 / Google 等）登录 Web 控制台，并按租户隔离能力包。
+
+**启用方式**：配置 `AGENTDOCK_OIDC_ISSUER` 与 `AGENTDOCK_OIDC_CLIENT_ID` 后重启，桌面端右上角出现「SSO 登录」按钮；登录成功后写入 `agentdock_session`（HttpOnly、SameSite=Lax、HMAC 签名，8 小时有效）。
+
+**流程**：OIDC Authorization Code + PKCE（零依赖实现，不做本地 JWT 验签，身份以 userinfo 端点为准）→ 用 `sub/email/name` 自动建号或复用已有账号 → 角色取 `role` claim（缺省为 `viewer`）→ 租户取 `tenant` claim（缺省 `default`）。
+
+**多租户语义**（版本 `tenant` 字段在发布时从令牌继承）：
+
+- 市场列表、统计、详情、审核队列、diff、SBOM、透明证明查询都按请求身份所属租户过滤；跨租户一律 404。
+- 同一租户内名称唯一；**不同租户可用同名包**（`kind/name` 共享，靠 `tenant` 列区分；JSON 后端存 `packages.<kind>/<name>.tenant`）。
+- 令牌/用户带 `tenant` 字段（`POST /api/v1/admin/tokens` 可指定）；审计与透明日志是全局视图（每条记录含操作者，后续可再按租户分区）。
+- 未启用 SSO 时行为不变：单租户 `default`，原有 Bearer 令牌继续可用。
+
+已知边界：OIDC discovery 与 token 交换要求 IdP 通过 HTTPS 可达；本服务自身不做 TLS，公网部署请用反向代理终结 TLS（见「部署」）。会话 Cookie 为 HMAC 签名而非服务端会话表，改密/禁用账号后需等 8 小时过期或重启服务强制失效。
+
 ## 部署（Docker / CI）
 
 ### Docker
@@ -554,7 +578,9 @@ agentdock/
 │   ├── policy.mjs           # 自动审批策略（归一化/校验/规则求值）
 │   ├── backend.mjs          # 元数据后端选择（json / sqlite 统一接口）
 │   ├── sqlite.mjs           # node:sqlite 后端（关系表 + WAL + db.json 自动迁移）
-│   ├── auth.mjs             # 令牌/角色
+│   ├── auth.mjs             # 令牌/角色/发布者密钥/OIDC 账号
+│   ├── session.mjs          # 会话 Cookie（HMAC 签名，8h）
+│   ├── oidc.mjs             # OIDC discovery + PKCE 授权码流程
 │   ├── audit.mjs            # JSONL 审计（哈希链 + 多维过滤 + 校验 + 导出 + 轮转）
 │   ├── config.mjs           # 配置与数据目录
 │   ├── errors.mjs / util.mjs / yaml.mjs
@@ -564,7 +590,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（87 个用例）
+├── tests/                   # node:test 测试（110 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -613,6 +639,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [x] 自动审批策略 Web 编辑页（admin 表单化编辑，CLI 等价保留）
 - [x] 审计日志哈希链（`audit verify` 校验断链、轮转归档、CSV/JSONL 导出）
 - [x] 版本检查与升级（`outdated` / `upgrade`，基于安装清单对比服务端最新版本）
+- [x] SSO 登录（OIDC + PKCE）与多租户隔离（市场/详情/审核/统计按 `tenant` 过滤）
 
 ## License
 

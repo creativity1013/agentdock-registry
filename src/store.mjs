@@ -146,7 +146,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 发布：校验 + 扫描通过后进入待审核队列 */
-  function publish(input, { actor = 'unknown', actorId = '', role = '', ip = '' } = {}) {
+  function publish(input, { actor = 'unknown', actorId = '', role = '', ip = '', tenant = 'default' } = {}) {
     const report = analyze(input);
     if (!report.valid) {
       throw unprocessable('能力包校验未通过', { errors: report.errors, warnings: report.warnings });
@@ -160,6 +160,9 @@ export function createStore(config, { audit, users, transparency } = {}) {
     const bundle = report.bundle;
     const pkgKey = keyOf(bundle.kind, bundle.name);
     let pkg = db.packages[pkgKey];
+    if (pkg && (pkg.tenant || 'default') !== tenant) {
+      throw conflict(`包名已被其他租户占用：${bundle.kind}/${bundle.name}`);
+    }
     const existing = pkg?.versions?.[bundle.version];
     if (existing && existing.status !== 'rejected') {
       throw conflict(`版本已存在：${bundle.kind}/${bundle.name}@${bundle.version}（当前状态：${existing.status}）`);
@@ -184,6 +187,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
     const versionDoc = {
       version: bundle.version,
       status: 'pending',
+      tenant,
       description: bundle.description,
       tags: bundle.tags,
       contentHash: bundle.contentHash,
@@ -212,6 +216,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       pkg = {
         kind: bundle.kind,
         name: bundle.name,
+        tenant,
         description: bundle.description,
         tags: bundle.tags,
         createdAt: submittedAt,
@@ -347,15 +352,17 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 取版本元数据（不校验发布状态） */
-  function getVersion(kind, name, version) {
+  function getVersion(kind, name, version, tenant = '') {
     if (!KINDS.includes(kind) || !isValidName(name)) return null;
     const pkg = db.packages[keyOf(kind, name)];
+    if (pkg && tenant && (pkg.tenant || 'default') !== tenant) return null;
     return pkg?.versions?.[version] ?? null;
   }
 
   /** 取可安装版本：未指定版本时取最新已发布版本 */
-  function requirePublished(kind, name, version) {
+  function requirePublished(kind, name, version, tenant = '') {
     const pkg = requirePackage(kind, name);
+    if (tenant && (pkg.tenant || 'default') !== tenant) throw notFound(`包不存在：${kind}/${name}`);
     let versionDoc;
     if (version) {
       versionDoc = pkg.versions[version];
@@ -397,20 +404,20 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 下载包内容（用于 CLI 安装） */
-  function bundleContent(kind, name, version) {
-    return bundleFromVersion(kind, name, requirePublished(kind, name, version));
+  function bundleContent(kind, name, version, tenant = '') {
+    return bundleFromVersion(kind, name, requirePublished(kind, name, version, tenant));
   }
 
   /** 审核 diff 用：读取任意状态的版本内容（可见性由调用方校验） */
-  function rawBundle(kind, name, version) {
-    const versionDoc = getVersion(kind, name, version);
+  function rawBundle(kind, name, version, tenant = '') {
+    const versionDoc = getVersion(kind, name, version, tenant);
     if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
     return bundleFromVersion(kind, name, versionDoc);
   }
 
   /** 单文件预览 */
-  function fileContent(kind, name, version, filePath) {
-    const versionDoc = requirePublished(kind, name, version);
+  function fileContent(kind, name, version, filePath, tenant = '') {
+    const versionDoc = requirePublished(kind, name, version, tenant);
     const file = versionDoc.files.find((item) => item.path === filePath);
     if (!file) throw notFound(`文件不存在：${filePath}`);
     if (file.encoding !== 'utf8') throw unprocessable('二进制文件不支持在线预览');
@@ -508,6 +515,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
     return {
       key: pkgKey,
       kind: pkg.kind,
+      tenant: pkg.tenant || 'default',
       name: pkg.name,
       description: pkg.description,
       tags: pkg.tags || [],
@@ -520,13 +528,14 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 市场列表：SQLite 后端下推到 SQL，JSON 后端在内存过滤 */
-  function listPackages({ q = '', kind = '', status = 'published', includePending = false } = {}) {
+  function listPackages({ q = '', kind = '', status = 'published', includePending = false, tenant = '' } = {}) {
     const query = String(q || '').trim().toLowerCase();
     const items = [];
     if (typeof backend.queryPackages === 'function') {
-      const rows = backend.queryPackages({ q: query, kind, status, includePending });
+      const rows = backend.queryPackages({ q: query, kind, status, includePending, tenant });
       const grouped = new Map();
       for (const row of rows) {
+        if (tenant && row.tenant && row.tenant !== tenant) continue;
         const pkgKey = `${row.kind}/${row.name}`;
         if (!grouped.has(pkgKey)) {
           grouped.set(pkgKey, {
@@ -545,6 +554,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       }
     } else {
       for (const [pkgKey, pkg] of Object.entries(db.packages)) {
+        if (tenant && (pkg.tenant || 'default') !== tenant) continue;
         const item = listItemFor(pkgKey, pkg, { query, kind, status, includePending });
         if (item) items.push(item);
       }
@@ -556,8 +566,9 @@ export function createStore(config, { audit, users, transparency } = {}) {
   /** 把单个包裁剪成市场列表项（两种后端共用） */
   function listItemFor(pkgKey, pkg, { query, kind, status, includePending }) {
     if (kind && pkg.kind !== kind) return null;
+    const includeAll = includePending || status === 'pending' || status === 'rejected';
     const visible = Object.values(pkg.versions).filter(
-      (item) => includePending || item.status === 'published',
+      (item) => includeAll || item.status === 'published',
     );
     const matching = status ? visible.filter((item) => item.status === status) : visible;
     if (matching.length === 0) return null;
@@ -567,6 +578,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
     return {
       key: pkgKey,
       kind: pkg.kind,
+      tenant: pkg.tenant || 'default',
       kindLabel: KIND_LABEL[pkg.kind],
       name: pkg.name,
       description: latest.description || pkg.description,
@@ -595,8 +607,9 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 包详情（版本列表按需过滤 pending） */
-  function packageDetail(kind, name, { includePending = false } = {}) {
+  function packageDetail(kind, name, { includePending = false, tenant = '' } = {}) {
     const pkg = requirePackage(kind, name);
+    if (tenant && (pkg.tenant || 'default') !== tenant) throw notFound(`包不存在：${kind}/${name}`);
     const latest = latestPublished(pkg);
     const versions = Object.values(pkg.versions)
       .filter((item) => includePending || item.status === 'published')
@@ -605,6 +618,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       kind: pkg.kind,
       kindLabel: KIND_LABEL[pkg.kind],
       name: pkg.name,
+      tenant: pkg.tenant || 'default',
       description: latest?.description || pkg.description,
       tags: latest?.tags || pkg.tags || [],
       createdAt: pkg.createdAt,
@@ -622,15 +636,17 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 审核队列（最早提交的在前） */
-  function reviewQueue() {
+  function reviewQueue(tenant = '') {
     const items = [];
     for (const [pkgKey, pkg] of Object.entries(db.packages)) {
       for (const versionDoc of Object.values(pkg.versions)) {
         if (versionDoc.status !== 'pending') continue;
+        if (tenant && (pkg.tenant || 'default') !== tenant) continue;
         items.push({
           key: pkgKey,
           kind: pkg.kind,
           name: pkg.name,
+          tenant: pkg.tenant || 'default',
           version: versionDoc.version,
           description: versionDoc.description,
           submittedAt: versionDoc.submittedAt,
@@ -664,8 +680,8 @@ export function createStore(config, { audit, users, transparency } = {}) {
     return versionDoc;
   }
 
-  function stats() {
-    if (typeof backend.queryStats === 'function') return backend.queryStats();
+  function stats(tenant = '') {
+    if (typeof backend.queryStats === 'function') return backend.queryStats(tenant);
     const result = {
       packages: 0,
       versions: 0,
@@ -676,6 +692,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
       byKind: { skill: 0, agent: 0, plugin: 0 },
     };
     for (const pkg of Object.values(db.packages)) {
+      if (tenant && (pkg.tenant || 'default') !== tenant) continue;
       result.packages += 1;
       result.byKind[pkg.kind] = (result.byKind[pkg.kind] || 0) + 1;
       result.installs += totalInstalls(pkg);
@@ -688,8 +705,8 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   /** 获取版本 SBOM */
-  function sbom(kind, name, version) {
-    const versionDoc = getVersion(kind, name, version);
+  function sbom(kind, name, version, tenant = '') {
+    const versionDoc = getVersion(kind, name, version, tenant);
     return versionDoc?.sbom ?? null;
   }
 
