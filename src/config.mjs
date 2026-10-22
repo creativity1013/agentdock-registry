@@ -18,6 +18,7 @@ export function loadConfig(env = process.env, overrides = {}) {
   const host = overrides.host ?? env.AGENTDOCK_HOST ?? '127.0.0.1';
   const dataDir = path.resolve(overrides.dataDir ?? env.AGENTDOCK_DATA ?? path.join(PKG_ROOT, 'data'));
   const home = overrides.home ?? resolveHome(env);
+  const installHome = overrides.installHome ?? env.AGENTDOCK_INSTALL_HOME ?? '';
   const webDir = overrides.webDir ?? path.join(PKG_ROOT, 'web');
 
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -98,6 +99,7 @@ export function loadConfig(env = process.env, overrides = {}) {
     port,
     dataDir,
     home,
+    installHome,
     webDir,
     publicUrl: overrides.publicUrl ?? env.AGENTDOCK_PUBLIC_URL ?? `http://${host}:${port}`,
     scanBlock: overrides.scanBlock ?? env.AGENTDOCK_SCAN_BLOCK ?? 'high',

@@ -719,13 +719,27 @@ export function createApp(config = loadConfig()) {
       }
       const versionDoc = store.requirePublished(body.kind, body.name, body.version || undefined, tenant);
       const bundle = store.bundleContent(body.kind, body.name, versionDoc.version, tenant);
-      const plan = planInstall(bundle, {
-        target: body.target || 'dsh',
-        home: config.home,
-        dir: body.dir,
-        force: body.force === true,
-      });
-      const result = applyInstall(plan);
+      let plan;
+      let result;
+      try {
+        plan = planInstall(bundle, {
+          target: body.target || 'dsh',
+          home: config.installHome || config.home,
+          dir: body.dir,
+          force: body.force === true,
+        });
+        result = applyInstall(plan);
+      } catch (error) {
+        if (['EPERM', 'EACCES', 'EROFS', 'ENOTDIR', 'ENOENT'].includes(error?.code)) {
+          throw new AppError(
+            400,
+            'INSTALL_TARGET_UNWRITABLE',
+            `服务端无法写入安装目录（${error.code}）。服务端可能在沙箱/容器内，没有写 ~/.dsh 等目录的权限；请改用「成员本机安装」的 CLI 命令，或设置 AGENTDOCK_INSTALL_HOME 指向可写目录。`,
+            { code: error.code, path: error.path, target: body.target || 'dsh' },
+          );
+        }
+        throw error;
+      }
       store.recordInstall(body.kind, body.name, versionDoc.version, {
         actor: auth.name,
         ip,

@@ -431,6 +431,7 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | `AGENTDOCK_RATE_LIMIT_MAX` | `300` | 每窗口每 IP 的 API 请求上限 |
 | `AGENTDOCK_RATE_LIMIT_LOGIN_MAX` | `20` | 每窗口每 IP 的 OIDC 登录端点上限 |
 | `AGENTDOCK_TRUST_PROXY` | — | 设为 `1` 时信任 `X-Forwarded-For`（必须置于可信反代之后） |
+| `AGENTDOCK_INSTALL_HOME` | 当前用户 home | 服务端「安装到平台主机」时的根目录；容器/沙箱内没有 `~/.dsh` 写权限时改为可写目录（成员本机安装不受影响） |
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 

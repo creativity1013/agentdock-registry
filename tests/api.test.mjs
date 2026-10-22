@@ -852,3 +852,37 @@ test('质量分级：仅人工审核 → 已验证；发布者签名 + 人工审
   assert.equal(signedDetail.data.versions[0].quality.level, 'official');
   assert.equal(signedDetail.data.versions[0].quality.checks.publisherSigned, true);
 });
+
+test('安装到不可写目录：返回 400 INSTALL_TARGET_UNWRITABLE，而不是 500', async () => {
+  const env = await startTestServer({ installHome: '/dev/null/agentdock-sandbox' });
+  try {
+    const created = await env.request('POST', '/packages', {
+      token: env.tokens.publisher,
+      body: skillPayload({
+        name: 'unwritable-demo',
+        files: [
+          {
+            path: 'SKILL.md',
+            encoding: 'utf8',
+            content: '---\nname: unwritable-demo\ndescription: 演示不可写目标\n---\n\n# demo\n\nhello.\n',
+          },
+        ],
+      }),
+    });
+    assert.equal(created.status, 201);
+    const approved = await env.request('POST', '/review', {
+      token: env.tokens.reviewer,
+      body: { kind: 'skill', name: 'unwritable-demo', version: '0.1.0', decision: 'approve' },
+    });
+    assert.equal(approved.status, 200);
+    const installed = await env.request('POST', '/install', {
+      token: env.tokens.publisher,
+      body: { kind: 'skill', name: 'unwritable-demo', target: 'dsh' },
+    });
+    assert.equal(installed.status, 400);
+    assert.equal(installed.data.error.code, 'INSTALL_TARGET_UNWRITABLE');
+    assert.match(installed.data.error.message, /AGENTDOCK_INSTALL_HOME/);
+  } finally {
+    await env.close();
+  }
+});
