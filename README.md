@@ -84,6 +84,7 @@ agentdock install agent/code-reviewer --target dsh-agent --profile web --force  
 # 审计与令牌（审计日志带防篡改哈希链）
 agentdock audit --limit 20                          # 查询：--actor/--action/--target/--from/--to
 agentdock audit verify --all                        # 校验哈希链（--all 含归档；断链 exit 1）
+agentdock audit --tenant acme                       # 只查看某租户的审计（admin）
 agentdock audit export --format csv --out audit.csv # 导出（csv / jsonl）
 agentdock tokens create --name ci-bot --role publisher
 
@@ -127,7 +128,7 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `upgrade <kind/name[@version]>` | 升级本地安装到最新/指定版本（`--target --dir --force --profile`），默认覆盖同名文件并上报安装计数；安装清单保留最近 5 个版本历史 |
 | `rollback <kind/name>` | 按安装清单历史回滚到上一个安装过的版本（`--target --dir`），同样做扫描/验签 |
 | `uninstall <kind/name>` | 按安装清单卸载（`--target --dir`；省略 `--target` 时扫描全部已知目标），删除包文件/目录与清单 |
-| `audit` | 审计日志查询/校验/导出：`audit [--limit --offset --action --actor --target --from --to --json]`；`audit verify [--all]` 校验哈希链（断链 exit 1）；`audit export --format csv\|jsonl [--out 文件]`（需 reviewer） |
+| `audit` | 审计日志查询/校验/导出：`audit [--limit --offset --tenant --action --actor --target --from --to --json]`；`audit verify [--all]` 校验哈希链（断链 exit 1）；`audit export --format csv\|jsonl [--out 文件]`（需 reviewer） |
 | `verify-signature <kind/name[@version]>` | 验证内容签名（ed25519）；同时重算磁盘内容哈希发现篡改（`--json`） |
 | `keys [--mine]` | 导出平台签名公钥（可离线验签）；`--mine` 查看自己的发布者公钥 |
 | `keygen` | 生成发布者 ed25519 密钥对（`--out --name --force`；私钥 600、公钥可公开） |
@@ -356,9 +357,9 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | GET | `/registry` | 公开 | 外部 registry 适配器信息与导出地址 |
 | GET | `/registry/export` | 公开 | 中立市场目录（`agentdock-marketplace@1`：bundleUrl、contentHash、签名摘要、digest） |
 | POST | `/sync/import` | publisher | 从外部 registry 导入 `{source:{type:"github",repo,path,ref}}` 或 `{source:{type:"mcp",name}}`；`dryRun:true` 只预检 |
-| GET | `/audit` | reviewer | 审计日志（`limit/offset/action/actor/target/from/to`，最新在前） |
+| GET | `/audit` | reviewer | 审计日志（`limit/offset/action/actor/target/from/to/tenant`，最新在前；非 admin 强制本租户） |
 | GET | `/audit/verify` | reviewer | 校验审计哈希链（`?all=1` 含归档；断链返回 409 与断链位置） |
-| GET | `/audit/export` | reviewer | 导出审计（`format=csv\|jsonl`，过滤参数同 `/audit`，时间正序） |
+| GET | `/audit/export` | reviewer | 导出审计（`format=csv\|jsonl`，过滤参数同 `/audit`（含 `tenant`），时间正序） |
 | GET | `/admin/users` | admin | 用户列表 |
 | POST | `/admin/tokens` | admin | 创建令牌 `{name,role,tenant}`（`tenant` 缺省为 `default`） |
 | PATCH | `/admin/users/:id` | admin | 禁用/启用用户 `{disabled}`；禁用即刻踢下线 |
@@ -684,7 +685,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（130 个用例）
+├── tests/                   # node:test 测试（131 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -709,7 +710,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 ## 安全模型与已知限制
 
 - 令牌只存 `sha256` 哈希；初始明文令牌仅出现在 `data/BOOTSTRAP-TOKENS.txt`（600 权限），建议首次登录后轮换并删除该文件。
-- 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip。每条记录带 `seq`/`prevHash`/`hash` 哈希链（`hash = sha256([seq, prevHash, ts, actor, role, action, target, meta, ip])`），篡改/删除/插入可被 `agentdock audit verify`（或 `GET /audit/verify`）定位；超过 `AGENTDOCK_AUDIT_MAX_BYTES`（默认 8MB）轮转到 `data/audit/archive/`，保留 `AGENTDOCK_AUDIT_KEEP`（默认 24）份归档，链跨文件连续。
+- 审计日志 append-only JSONL，记录 actor/role/action/target/meta/ip；发布/审核/安装/令牌等条目在 `meta.tenant` 写入租户，`GET /audit?tenant=` 可按租户过滤（admin 可看全部或任意租户，reviewer 强制本租户），导出同样支持。每条记录带 `seq`/`prevHash`/`hash` 哈希链（`hash = sha256([seq, prevHash, ts, actor, role, action, target, meta, ip])`），篡改/删除/插入可被 `agentdock audit verify`（或 `GET /audit/verify`）定位；超过 `AGENTDOCK_AUDIT_MAX_BYTES`（默认 8MB）轮转到 `data/audit/archive/`，保留 `AGENTDOCK_AUDIT_KEEP`（默认 24）份归档，链跨文件连续。
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
 - **限流**：`/api/*` 与 OIDC 登录端点按 IP 滑动窗口限流（默认 300/分钟、登录 20/分钟），超限返回 429 + `Retry-After`；`AGENTDOCK_RATE_LIMIT=0` 可关闭。进程内计数，多实例部署需在网关层再做全局限流。
 - **CSRF**：SSO Cookie 会话的写操作（POST/PUT/PATCH/DELETE）必须携带双提交令牌 `x-agentdock-csrf`（值等于非 HttpOnly 的 `agentdock_csrf` Cookie），并校验 `Origin` 与 `Host` 一致；Bearer 令牌客户端不受影响。

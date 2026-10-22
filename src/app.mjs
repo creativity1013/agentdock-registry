@@ -712,7 +712,9 @@ export function createApp(config = loadConfig()) {
       requireRole('reviewer');
       const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') || 100)));
       const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
-      return sendJson(res, 200, audit.read({ limit, offset, ...auditFilters(url) }));
+      const tenant = auditTenant(url, auth, ctx);
+      const result = audit.read({ limit, offset, ...auditFilters(url), tenant: tenant.filter });
+      return sendJson(res, 200, { ...result, tenant: tenant.applied });
     }
     if (route === 'audit/verify' && method === 'GET') {
       requireRole('reviewer');
@@ -723,7 +725,8 @@ export function createApp(config = loadConfig()) {
       requireRole('reviewer');
       const format = url.searchParams.get('format') || 'jsonl';
       if (format !== 'csv' && format !== 'jsonl') throw badRequest(`format 只能是 csv / jsonl：${format}`);
-      const { contentType, body } = audit.exportLines({ format, ...auditFilters(url) });
+      const tenant = auditTenant(url, auth, ctx);
+      const { contentType, body } = audit.exportLines({ format, ...auditFilters(url), tenant: tenant.filter });
       res.writeHead(200, {
         'Content-Type': contentType,
         'Content-Length': Buffer.byteLength(body),
@@ -882,6 +885,16 @@ export function createApp(config = loadConfig()) {
 /* ------------------------------ 工具函数 ------------------------------ */
 
 /** 从查询串提取审计过滤参数（action/actor 精确，target 子串，from/to ISO 范围） */
+/** 审计按租户过滤：admin 可显式指定任意租户（或 * 看全部）；其他角色强制本租户 */
+function auditTenant(url, auth, ctx) {
+  const requested = url.searchParams.get('tenant') || '';
+  if (auth.role === 'admin') {
+    return { filter: requested, applied: requested || '*' };
+  }
+  const own = ctx.tenant || 'default';
+  return { filter: own, applied: own };
+}
+
 function auditFilters(url) {
   return {
     action: url.searchParams.get('action') || '',

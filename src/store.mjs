@@ -290,7 +290,7 @@ export function createStore(config, { audit, users, transparency, notifier } = {
       role,
       action: 'package.publish',
       target: `${pkgKey}@${bundle.version}`,
-      meta: { fileCount: versionDoc.fileCount, totalBytes: versionDoc.totalBytes, contentHash: versionDoc.contentHash, blocked: versionDoc.overrideScan, sbomDigest: versionDoc.sbom.digest },
+      meta: { tenant: versionDoc.tenant || 'default', fileCount: versionDoc.fileCount, totalBytes: versionDoc.totalBytes, contentHash: versionDoc.contentHash, blocked: versionDoc.overrideScan, sbomDigest: versionDoc.sbom.digest },
       ip,
     });
 
@@ -363,7 +363,7 @@ export function createStore(config, { audit, users, transparency, notifier } = {
       role,
       action: auto ? 'review.auto_approve' : 'review.approve',
       target: `${kind}/${name}@${versionDoc.version}`,
-      meta: { note: String(note || '').trim().slice(0, 200), keyId: signature.keyId, auto },
+      meta: { tenant: versionDoc.tenant || 'default', note: String(note || '').trim().slice(0, 200), keyId: signature.keyId, auto },
       ip,
     });
     transparency?.append({
@@ -418,7 +418,7 @@ export function createStore(config, { audit, users, transparency, notifier } = {
       role,
       action: 'review.reject',
       target: `${kind}/${name}@${version}`,
-      meta: { note: note.trim().slice(0, 200) },
+      meta: { tenant: versionDoc.tenant || 'default', note: note.trim().slice(0, 200) },
       ip,
     });
     notifier?.emit('review.rejected', {
@@ -755,7 +755,7 @@ export function createStore(config, { audit, users, transparency, notifier } = {
       role: '',
       action: 'package.install',
       target: `${kind}/${name}@${versionDoc.version}`,
-      meta: { target },
+      meta: { target, tenant: versionDoc.tenant || 'default' },
       ip,
     });
     return versionDoc;

@@ -22,6 +22,7 @@ const state = {
   kind: '',
   detail: null,
   reviewCount: 0,
+  auditTenant: '',
   page: 1,
 };
 
@@ -1134,7 +1135,21 @@ async function renderReview(main) {
 /* ------------------------------ 审计 ------------------------------ */
 
 async function renderAudit(main) {
-  const data = await api('/audit?limit=100');
+  const admin = can('admin');
+  const data = await api(`/audit?limit=100${state.auditTenant ? `&tenant=${encodeURIComponent(state.auditTenant)}` : ''}`);
+  const tenantInput = admin
+    ? h('input', { placeholder: '租户（留空看全部，admin）', value: state.auditTenant || '' })
+    : null;
+  const apply = admin
+    ? h('button', {
+        class: 'btn btn-ghost',
+        type: 'button',
+        onClick: () => {
+          state.auditTenant = tenantInput.value.trim();
+          render();
+        },
+      }, '按租户筛选')
+    : null;
   const rows = data.items.map((item) =>
     h(
       'div',
@@ -1142,12 +1157,16 @@ async function renderAudit(main) {
       h('span', { class: 'mono muted' }, fmtTime(item.ts)),
       h('span', { class: 'chip' }, item.actor || 'anonymous'),
       h('span', { class: 'chip' }, item.action),
+      h('span', { class: 'chip' }, `租户 ${item.meta?.tenant || 'default'}`),
       h('span', { class: 'grow mono' }, item.target || '-'),
       h('span', { class: 'muted mono' }, item.meta ? JSON.stringify(item.meta).slice(0, 80) : ''),
     ),
   );
   main.replaceChildren(
-    h('div', { class: 'section-title' }, h('h2', {}, '审计日志'), h('span', { class: 'muted' }, `最近 ${data.items.length} / 共 ${data.total} 条`)),
+    h('div', { class: 'section-title' },
+      h('h2', {}, '审计日志'),
+      h('span', { class: 'muted' }, `最近 ${data.items.length} / 共 ${data.total} 条${data.tenant && data.tenant !== '*' ? ` · 租户 ${data.tenant}` : ''}`)),
+    admin ? h('div', { class: 'panel' }, h('div', { class: 'actions' }, tenantInput, apply)) : null,
     rows.length ? h('div', { class: 'list' }, ...rows) : h('div', { class: 'empty' }, '暂无审计记录'),
   );
 }

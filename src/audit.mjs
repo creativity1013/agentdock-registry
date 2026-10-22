@@ -187,7 +187,12 @@ export function createAuditLog(config) {
     return { entries, corrupt };
   }
 
-  function matchFilters(entry, { action, actor, target, from, to }) {
+  function matchFilters(entry, { action, actor, target, from, to, tenant }) {
+    if (tenant && tenant !== '*') {
+      // 多租户前写入的条目没有 meta.tenant，统一视作 default
+      const entryTenant = entry.meta?.tenant || 'default';
+      if (entryTenant !== tenant) return false;
+    }
     if (action && entry.action !== action) return false;
     if (actor && entry.actor !== actor) return false;
     if (target) {
@@ -206,18 +211,19 @@ export function createAuditLog(config) {
     return true;
   }
 
-  function normalizeFilters({ action = '', actor = '', target = '', from = '', to = '' } = {}) {
+  function normalizeFilters({ action = '', actor = '', target = '', from = '', to = '', tenant = '' } = {}) {
     return {
       action: String(action || ''),
       actor: String(actor || ''),
       target: String(target || ''),
       from: String(from || ''),
       to: String(to || ''),
+      tenant: String(tenant || ''),
     };
   }
 
-  function read({ limit = 100, offset = 0, action = '', actor = '', target = '', from = '', to = '' } = {}) {
-    const filters = normalizeFilters({ action, actor, target, from, to });
+  function read({ limit = 100, offset = 0, action = '', actor = '', target = '', from = '', to = '', tenant = '' } = {}) {
+    const filters = normalizeFilters({ action, actor, target, from, to, tenant });
     const { entries } = parseFile(file);
     const filtered = entries.filter((entry) => matchFilters(entry, filters));
     const reversed = filtered.slice().reverse();

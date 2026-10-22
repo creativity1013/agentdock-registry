@@ -388,6 +388,7 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 - **租户策略与配额测试**（`tests/tenant-policy.test.mjs`）：租户独立自动审批、跨租户互不可见/同名冲突、三类配额上限与非法配额 400。
 - **备份/恢复测试**（`tests/backup.test.mjs`）：gzip 往返、排除令牌、非空目录/force/dry-run、篡改与不安全路径拒绝、未压缩 JSON 兼容。
 - **安全测试**（`tests/security.test.mjs`）：限流滑动窗口与恢复、CSRF 校验矩阵、接口 429 + `Retry-After`。
+- **审计租户过滤测试**（`tests/audit-tenant.test.mjs`）：admin 按租户筛选、reviewer 强制本租户（无法越权）、导出同样过滤。
 - **通知测试**（`tests/notify.test.mjs`）：各平台 payload 与 HMAC 签名、配置校验、按事件过滤、投递失败只审计、发布/审核真实触发 webhook。
 - **会话吊销测试**（`tests/session-revocation.test.mjs`）：禁用立即踢下线、启用不复活旧会话、按用户/全员吊销、禁用用户的 Bearer 令牌失效。
 - **认证与多租户测试**（`tests/sso.test.mjs` / `tests/tenant.test.mjs`）：本地 mock OIDC（discovery/token/userinfo）验证 PKCE 登录、Cookie 会话与自动建号；多租户验证列表/详情/审核队列/统计隔离、跨租户 404 与同名冲突、非法租户名拒绝。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。

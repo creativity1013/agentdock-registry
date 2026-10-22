@@ -1285,7 +1285,7 @@ async function cmdAudit(positionals, flags) {
 /** 审计查询/导出共用的过滤参数 */
 function auditQuery(flags) {
   const query = new URLSearchParams();
-  for (const key of ['action', 'actor', 'target', 'from', 'to', 'limit', 'offset']) {
+  for (const key of ['action', 'actor', 'target', 'from', 'to', 'tenant', 'limit', 'offset']) {
     const value = flags[key];
     if (value !== undefined && value !== true && value !== '') query.set(key, String(value));
   }
