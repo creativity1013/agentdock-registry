@@ -1,0 +1,25 @@
+{
+  "kind": "plugin",
+  "name": "ops-kit",
+  "version": "0.1.0",
+  "description": "运维值班工具集：故障响应清单、发布前检查表、事故复盘模板。",
+  "tags": [
+    "ops",
+    "on-call",
+    "runbook"
+  ],
+  "files": [
+    {
+      "path": "plugin.json",
+      "content": "{\n  \"name\": \"ops-kit\",\n  \"version\": \"0.1.0\",\n  \"description\": \"运维值班工具集：故障响应清单、发布前检查表、事故复盘模板。\",\n  \"tags\": [\"ops\", \"on-call\", \"runbook\"],\n  \"skills\": [\"skills/incident-checklist\", \"skills/release-checklist\"]\n}\n"
+    },
+    {
+      "path": "skills/incident-checklist/SKILL.md",
+      "content": "---\nname: incident-checklist\ndescription: 线上故障响应清单：从确认影响面到止血、复盘的标准流程。\n---\n\n# 故障响应清单\n\n1. **确认现象**：错误率、延迟、可用性指标；确认影响范围（租户/地域/功能）。\n2. **定级**：P0（核心不可用）/ P1（部分降级）/ P2（轻微）；同步给值班负责人。\n3. **止血优先**：回滚最近变更、关闭开关、扩容、限流，先恢复再定位。\n4. **记录时间线**：每个动作记录时间、执行人、结果，为复盘保留证据。\n5. **根因分析**：从变更、依赖、容量、数据四个方向排查；避免在止血阶段做大规模重构。\n6. **复盘**：24 小时内产出复盘文档，包含时间线、根因、影响、改进项与负责人。\n"
+    },
+    {
+      "path": "skills/release-checklist/SKILL.md",
+      "content": "---\nname: release-checklist\ndescription: 发布前检查表：变更说明、回滚方案、监控与灰度步骤。\n---\n\n# 发布前检查表\n\n- [ ] 变更说明与影响面已写清，评审已通过。\n- [ ] 回滚方案可用（回滚命令、数据兼容性、开关状态）。\n- [ ] 新增依赖与配置项已确认（默认值、密码/密钥来源）。\n- [ ] 监控与告警覆盖新增逻辑的关键指标。\n- [ ] 灰度计划：先小流量、观察指标、再全量。\n- [ ] 值班与联系人明确，发布窗口避开高峰期。\n"
+    }
+  ]
+}
