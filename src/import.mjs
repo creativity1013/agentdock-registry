@@ -161,6 +161,29 @@ function cleanImportFiles(files) {
 
 const MANIFEST_BASENAMES = new Set(['skill.md', 'agent.md', 'plugin.json']);
 
+const NESTED_ARCHIVE_RE = /\.(zip|tar\.gz|tgz|tar)$/i;
+
+/** 文件夹里直接放着若干 .zip/.tar.gz 时，逐个解压成独立能力包 */
+function extractNestedArchives(files) {
+  const archives = [];
+  const loose = [];
+  for (const file of files) {
+    if (!NESTED_ARCHIVE_RE.test(file.path) || file.encoding !== 'base64') {
+      loose.push(file);
+      continue;
+    }
+    const buffer = Buffer.from(file.content, 'base64');
+    let read;
+    try {
+      read = readArchive(buffer, file.path);
+    } catch (error) {
+      throw new ArchiveError(`归档 ${file.path} 解析失败：${error.message}`);
+    }
+    archives.push({ root: file.path.replace(NESTED_ARCHIVE_RE, ''), files: read.files, format: read.format });
+  }
+  return { archives, loose };
+}
+
 function manifestRootsOf(files) {
   const roots = [];
   for (const file of files) {
@@ -216,6 +239,29 @@ async function finalizeSinglePackage(files, { filename, overrides, format, hints
 async function finalizeFromFiles(files, { filename, overrides, format, hints = {} } = {}) {
   const cleaned = cleanImportFiles(files);
   if (cleaned.length === 0) throw new ArchiveError('没有可导入的文件（隐藏文件、.git、node_modules 等已被过滤）');
+  const { archives, loose } = extractNestedArchives(cleaned);
+  if (archives.length > 0) {
+    const packages = [];
+    for (const archive of archives) {
+      packages.push(await finalizeSinglePackage(archive.files, {
+        filename: archive.root,
+        overrides: { ...overrides, name: undefined, version: undefined },
+        format: `${format}+${archive.format}`,
+        hints,
+      }));
+    }
+    for (const folder of splitFolderPackages(loose)) {
+      if (manifestRootsOf(folder.files).length === 0) continue;
+      packages.push(await finalizeSinglePackage(folder.files, {
+        filename: folder.root,
+        overrides: { ...overrides, name: undefined, version: undefined },
+        format,
+        hints,
+      }));
+    }
+    if (packages.length === 1) return packages[0];
+    return { format: `${format}-batch`, packages };
+  }
   if (manifestRootsOf(cleaned).length === 0) {
     const tops = [...new Set(cleaned.map((file) => file.path.split('/')[0]))].slice(0, 8);
     throw new ArchiveError(`没有找到清单文件（SKILL.md / agent.md / plugin.json）。当前文件/目录：${tops.join('、') || '（空）'}`);

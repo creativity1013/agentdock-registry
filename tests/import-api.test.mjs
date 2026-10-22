@@ -197,6 +197,41 @@ test('文件夹里没有清单文件时给出清晰错误', async () => {
   assert.match(data.error.message, /没有找到清单文件/);
 });
 
+test('文件夹里放多个 zip：逐个解压为独立能力包批量导入', async () => {
+  const zipA = makeZip([{ path: 'a/SKILL.md', content: '---\nname: nested-zip-a\ndescription: A\n---\n\n# A\n' }]);
+  const zipB = makeZip([{ path: 'b/SKILL.md', content: '---\nname: nested-zip-b\ndescription: B\n---\n\n# B\n' }]);
+  const response = await fetch(`${server.url}/api/v1/import?filename=bundle-folder.json`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: 'zip-a.zip', content: zipA.toString('base64'), encoding: 'base64' },
+        { path: 'zip-b.zip', content: zipB.toString('base64'), encoding: 'base64' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.batch, true);
+  assert.deepEqual(data.results.map((item) => item.package.name).sort(), ['nested-zip-a', 'nested-zip-b']);
+});
+
+test('文件夹里只有一个 zip：按单个包导入', async () => {
+  const zip = makeZip([{ path: 'only/SKILL.md', content: '---\nname: only-zip\ndescription: only\n---\n\n# only\n' }]);
+  const response = await fetch(`${server.url}/api/v1/import?filename=folder-one.json`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [{ path: 'only.zip', content: zip.toString('base64'), encoding: 'base64' }],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.batch ?? false, false);
+  assert.equal(data.package.name, 'only-zip');
+  assert.equal(data.version.status, 'pending');
+});
+
 test('dryRun：只预览不落库', async () => {
   const before = await fetch(`${server.url}/api/v1/packages?pageSize=100`).then((res) => res.json());
   const response = await fetch(`${server.url}/api/v1/import?dryRun=1&filename=dry.zip&name=dry-skill&version=0.1.0`, {
