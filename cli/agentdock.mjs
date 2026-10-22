@@ -95,6 +95,9 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock users disable|enable <id或名字>         禁用/启用用户（禁用即踢下线，需 admin）
   agentdock users revoke <id或名字>                 强制该用户所有会话下线（需 admin）
   agentdock sessions revoke-all                     强制全员会话下线（需 admin）
+  agentdock notify show                             查看 webhook 通知配置（需 admin）
+  agentdock notify set <配置.json>                   设置通知配置（需 admin）
+  agentdock notify test                             发送一条测试通知（需 admin）
 
   agentdock backup [--data <目录>] [--out <文件>] [--no-bootstrap]
                                                    备份 data/ 为带校验和的 gzip 归档（默认 agentdock-backup-<时间>.json.gz）
@@ -1308,6 +1311,39 @@ async function resolveAdminUser(conn, key) {
   return user;
 }
 
+async function cmdNotify(positionals, flags) {
+  const action = positionals[0] || 'show';
+  const conn = resolveConnection(flags);
+  requireToken(conn);
+  if (action === 'show') {
+    const data = await api(conn, 'GET', '/api/v1/notify');
+    console.log(`通知：${data.notify.enabled ? '已启用' : '未启用'}（${data.notify.webhooks.length} 个 webhook）`);
+    console.log(`配置文件：${data.file}`);
+    for (const hook of data.notify.webhooks) {
+      console.log(`  - ${hook.name} [${hook.format}] ${hook.url}`);
+      console.log(`    事件：${hook.events.length ? hook.events.join(', ') : '全部'}${hook.secret ? ' · 已配置签名' : ''}`);
+    }
+    return;
+  }
+  if (action === 'set') {
+    const file = positionals[1];
+    if (!file) throw new Error('用法：agentdock notify set <配置.json>');
+    const notify = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+    const data = await api(conn, 'PUT', '/api/v1/notify', { notify });
+    console.log(`✓ 通知配置已更新：${data.notify.enabled ? '已启用' : '未启用'}，${data.notify.webhooks.length} 个 webhook`);
+    return;
+  }
+  if (action === 'test') {
+    const data = await api(conn, 'POST', '/api/v1/notify/test', {});
+    console.log(`✓ 测试通知已发送（${data.sent} 个 webhook）`);
+    for (const result of data.results || []) {
+      console.log(`  - ${result.name}: ${result.ok ? `HTTP ${result.status}` : result.error}`);
+    }
+    return;
+  }
+  throw new Error('notify 子命令：show | set <配置.json> | test');
+}
+
 async function cmdUsers(positionals, flags) {
   const action = positionals[0];
   const key = positionals[1];
@@ -1545,6 +1581,9 @@ async function main() {
       break;
     case 'sessions':
       await cmdSessions(positionals, flags);
+      break;
+    case 'notify':
+      await cmdNotify(positionals, flags);
       break;
     case 'tokens':
       return cmdTokens(positionals, flags);

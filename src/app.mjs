@@ -17,6 +17,7 @@ import { createTransparencyLog } from './transparency.mjs';
 import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
 import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, setPolicyFor, PolicyError } from './policy.mjs';
 import { createSessionManager } from './session.mjs';
+import { NOTIFY_EVENTS, NOTIFY_FORMATS, createNotifier, loadNotify } from './notify.mjs';
 import { createOidcClient } from './oidc.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
@@ -50,7 +51,8 @@ export function createApp(config = loadConfig()) {
   const users = createUserDirectory(config);
   const audit = createAuditLog(config);
   const transparency = createTransparencyLog(config);
-  const store = createStore(config, { audit, users, transparency });
+  const notifier = createNotifier(config, audit);
+  const store = createStore(config, { audit, users, transparency, notifier });
   const policyState = loadPolicy(config);
   store.setPolicies(policyState.policies);
   const rateLimit = config.security?.rateLimit || { enabled: false };
@@ -665,6 +667,46 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { ok: true, tenant: ctx.tenant, policy: next, message: '策略已更新' });
     }
 
+    // 事件通知（admin）
+    if (route === 'notify' && method === 'GET') {
+      requireRole('admin');
+      return sendJson(res, 200, {
+        ok: true,
+        notify: notifier.get(),
+        file: loadNotify(config).file,
+        events: NOTIFY_EVENTS,
+        formats: NOTIFY_FORMATS,
+      });
+    }
+
+    if (route === 'notify' && method === 'PUT') {
+      requireRole('admin');
+      const body = await readBody(req);
+      const input = body?.notify ?? body;
+      const next = notifier.set(input);
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'notify.update',
+        target: 'notify.json',
+        meta: { enabled: next.enabled, webhooks: next.webhooks.length },
+        ip,
+      });
+      return sendJson(res, 200, { ok: true, notify: next, message: '通知配置已更新' });
+    }
+
+    if (route === 'notify/test' && method === 'POST') {
+      requireRole('admin');
+      const result = await notifier.emit('package.published', {
+        kind: 'skill',
+        name: 'demo-skill',
+        version: '0.0.0',
+        submittedBy: auth.name,
+        test: true,
+      });
+      return sendJson(res, 200, { ok: true, ...result, message: '测试通知已发送' });
+    }
+
     // 审计日志（哈希链 + 多维过滤）
     if (route === 'audit' && method === 'GET') {
       requireRole('reviewer');
@@ -834,7 +876,7 @@ export function createApp(config = loadConfig()) {
     }
   });
 
-  return { server, config, users, audit, store, transparency, sessions };
+  return { server, config, users, audit, store, transparency, sessions, notifier };
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */

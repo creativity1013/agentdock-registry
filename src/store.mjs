@@ -35,7 +35,7 @@ const MAX_REVIEW_NOTE = 2000;
  * 元数据 + 包文件存储。db.json 只放元数据，能力包内容落盘到 data/packages/<kind>/<name>/<version>/files。
  * 所有版本内容不可变；唯一例外是被拒绝的版本允许重新提交覆盖。
  */
-export function createStore(config, { audit, users, transparency } = {}) {
+export function createStore(config, { audit, users, transparency, notifier } = {}) {
   ensureDataLayout(config);
   const dbFile = config.files.db;
   const packagesDir = config.files.packages;
@@ -328,6 +328,15 @@ export function createStore(config, { audit, users, transparency } = {}) {
         });
       }
     }
+    const notifyEvent = autoApproved ? 'review.auto_approved' : 'package.published';
+    notifier?.emit(notifyEvent, {
+      kind: bundle.kind,
+      name: bundle.name,
+      version: versionDoc.version,
+      tenant: versionDoc.tenant || 'default',
+      submittedBy: actor,
+      autoApproved,
+    });
     return { package: summarizePackage(pkgKey, pkg), version: versionDoc, autoApproved };
   }
 
@@ -367,6 +376,15 @@ export function createStore(config, { audit, users, transparency } = {}) {
       publisherKeyId: versionDoc.publisherSignature?.keyId || '',
       review: { decision: 'approve', reviewer: actor, auto },
     });
+    notifier?.emit(auto ? 'review.auto_approved' : 'review.approved', {
+      kind,
+      name,
+      version: versionDoc.version,
+      tenant: versionDoc.tenant || 'default',
+      actor,
+      autoApproved: auto,
+      note: String(note || '').trim(),
+    });
     return versionDoc;
   }
 
@@ -402,6 +420,14 @@ export function createStore(config, { audit, users, transparency } = {}) {
       target: `${kind}/${name}@${version}`,
       meta: { note: note.trim().slice(0, 200) },
       ip,
+    });
+    notifier?.emit('review.rejected', {
+      kind,
+      name,
+      version,
+      tenant: versionDoc.tenant || 'default',
+      actor,
+      reason: note.trim().slice(0, 500),
     });
     return versionDoc;
   }

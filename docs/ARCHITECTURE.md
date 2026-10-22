@@ -268,6 +268,7 @@ data/
 | `src/backend.mjs` | 元数据后端选择与统一接口（json / sqlite） | `createBackend`、`describeBackends`、`BACKEND_KINDS` |
 | `src/sqlite.mjs` | `node:sqlite` 后端：关系表 + WAL + db.json 自动迁移 | `createSqliteBackend`、`sqliteAvailable`、`SQLITE_SCHEMA_VERSION` |
 | `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 + OIDC 账号开通 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf/getUser/provisionOidcUser`）、`tokenFromRequest` |
+| `src/notify.mjs` | 事件通知：webhook/IM payload 渲染、HMAC 签名、5s 超时、失败审计 | `createNotifier`、`normalizeNotifyConfig`、`renderPayload`、`signBody`、`loadNotify`、`saveNotify` |
 | `src/session.mjs` | 会话 Cookie：HMAC-SHA256 签名、8h 过期、用户级 `sessionEpoch` + 全局 `globalEpoch` 吊销 | `createSessionManager`（`sign/verify/cookieFrom/cookieHeader/clearCookie/revokeAll/currentGlobalEpoch`）、`SESSION_COOKIE` |
 | `src/oidc.mjs` | OIDC discovery + PKCE 授权码流程（零依赖，身份以 userinfo 为准） | `createOidcClient`（`discover/createPkcePair/createState/authorizeUrl/exchangeCode/userinfo/mapClaims/loginUrl`） |
 | `src/security.mjs` | Cookie 会话 CSRF 防护（双提交 Cookie + Origin 校验） | `checkCsrf`、`cookieValue`、`CSRF_COOKIE` |
@@ -387,6 +388,7 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 - **租户策略与配额测试**（`tests/tenant-policy.test.mjs`）：租户独立自动审批、跨租户互不可见/同名冲突、三类配额上限与非法配额 400。
 - **备份/恢复测试**（`tests/backup.test.mjs`）：gzip 往返、排除令牌、非空目录/force/dry-run、篡改与不安全路径拒绝、未压缩 JSON 兼容。
 - **安全测试**（`tests/security.test.mjs`）：限流滑动窗口与恢复、CSRF 校验矩阵、接口 429 + `Retry-After`。
+- **通知测试**（`tests/notify.test.mjs`）：各平台 payload 与 HMAC 签名、配置校验、按事件过滤、投递失败只审计、发布/审核真实触发 webhook。
 - **会话吊销测试**（`tests/session-revocation.test.mjs`）：禁用立即踢下线、启用不复活旧会话、按用户/全员吊销、禁用用户的 Bearer 令牌失效。
 - **认证与多租户测试**（`tests/sso.test.mjs` / `tests/tenant.test.mjs`）：本地 mock OIDC（discovery/token/userinfo）验证 PKCE 登录、Cookie 会话与自动建号；多租户验证列表/详情/审核队列/统计隔离、跨租户 404 与同名冲突、非法租户名拒绝。CI 额外跑 `npm run smoke:sqlite`（`AGENTDOCK_STORE=sqlite` 的真实端到端）。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果；`smoke:sqlite` 用 SQLite 后端跑同一套。

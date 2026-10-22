@@ -135,9 +135,10 @@ export function loadConfig(env = process.env, overrides = {}) {
       packages: path.join(dataDir, 'packages'),
       signingKey: path.join(dataDir, 'signing-key.json'),
       transparency: path.join(dataDir, 'transparency.log'),
-    sessions: path.join(dataDir, 'sessions.json'),
+      sessions: path.join(dataDir, 'sessions.json'),
       policy: path.join(dataDir, 'policy.json'),
       sessionSecret: path.join(dataDir, 'session-secret.json'),
+      notify: path.join(dataDir, 'notify.json'),
     },
   };
   return config;

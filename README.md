@@ -138,6 +138,7 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `tokens create\|list` | 令牌管理（需 admin） |
 | `users disable\|enable\|revoke <id或名字>` | 禁用/启用用户、强制其会话下线（需 admin） |
 | `sessions revoke-all` | 强制全员会话下线（需 admin） |
+| `notify show\|set <配置.json>\|test` | 查看/设置 webhook 通知、发送测试通知（需 admin） |
 | `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
 | `sync sources` | 查看已配置的外部 registry 适配器（GitHub / MCP registry） |
 | `sync import github <owner/repo>` | 从 GitHub 目录导入 skill/agent/plugin（`--path --ref --version --dry-run`），进入待审核 |
@@ -363,6 +364,9 @@ agentdock upgrade agent/code-reviewer --target dsh-agent --profile web   # 顺�
 | PATCH | `/admin/users/:id` | admin | 禁用/启用用户 `{disabled}`；禁用即刻踢下线 |
 | POST | `/admin/users/:id/revoke-sessions` | admin | 强制该用户所有会话下线（sessionEpoch +1） |
 | POST | `/admin/sessions/revoke-all` | admin | 强制全员会话下线（globalEpoch +1） |
+| GET | `/notify` | admin | 查看 webhook 通知配置 |
+| PUT | `/notify` | admin | 更新通知配置 `{notify:{enabled,webhooks:[{name,url,format,events,secret}]}}` |
+| POST | `/notify/test` | admin | 发送一条测试通知 |
 
 发布请求体即能力包 JSON：
 
@@ -615,6 +619,32 @@ docker exec agentdock cat /data/BOOTSTRAP-TOKENS.txt
 
 项目零第三方依赖，因此 CI 不需要 `npm install`，也没有 lockfile 需要维护。
 
+## 事件通知（Webhook / IM）
+
+发布、审核结果可推送到 Slack / Discord / 飞书 / 钉钉 / 企业微信，或任意自定义 JSON webhook。配置由 admin 写入 `data/notify.json`（也可用 `notify set`）：
+
+```json
+{
+  "schema": "agentdock-notify@1",
+  "enabled": true,
+  "webhooks": [
+    { "name": "team-feishu", "url": "https://open.feishu.cn/open-apis/bot/v2/hook/xxx", "format": "feishu" },
+    { "name": "review-bot", "url": "https://example.com/hook", "format": "json", "events": ["review.approved", "review.rejected"], "secret": "hmac-secret" }
+  ]
+}
+```
+
+- 事件：`package.published`、`review.approved`、`review.rejected`、`review.auto_approved`；`events` 为空表示全部订阅。
+- 格式：`json`（`{event,text,data,at}`，适合自建机器人）、`slack`/`discord`（`{text}`）、`feishu`、`dingtalk`、`wecom`（平台文本消息结构）。
+- 安全：webhook URL 只能由 admin 通过 API/CLI/配置文件设置（不接受请求体里的任意 URL），出站请求固定 5 秒超时，失败只写审计（`notify.failed`）不影响发布/审核。
+- 签名：配置 `secret` 时，请求头带 `x-agentdock-signature: sha256=<hex>`（HMAC-SHA256 请求体），接收方应校验。
+
+```bash
+agentdock notify show
+agentdock notify set deploy/notify.json   # 用自己的 JSON 覆盖
+agentdock notify test                     # 发一条测试消息
+```
+
 ## 项目结构
 
 ```
@@ -640,6 +670,7 @@ agentdock/
 │   ├── sqlite.mjs           # node:sqlite 后端（关系表 + WAL + db.json 自动迁移）
 │   ├── auth.mjs             # 令牌/角色/发布者密钥/OIDC 账号
 │   ├── session.mjs          # 会话 Cookie（HMAC 签名 + 用户/全局世代吊销，8h）
+│   ├── notify.mjs           # 事件通知（webhook / Slack / 飞书 / 钉钉 / 企微，HMAC 签名）
 │   ├── oidc.mjs             # OIDC discovery + PKCE 授权码流程
 │   ├── security.mjs         # CSRF 双提交校验（Cookie 会话）
 │   ├── ratelimit.mjs        # 内存滑动窗口限流 / 来源 IP 解析
@@ -653,7 +684,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（126 个用例）
+├── tests/                   # node:test 测试（130 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
