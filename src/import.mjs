@@ -134,11 +134,34 @@ export async function buildImportPayload({ filename = '', contentType = '', buff
   return finalizeFromFiles(archive.files, { filename, overrides, format: archive.format });
 }
 
+/** 文件夹上传时浏览器会带上 .DS_Store、.git/、node_modules/ 等，直接过滤掉 */
+const IGNORED_SEGMENTS = new Set(['node_modules', '__macosx', 'thumbs.db', 'desktop.ini']);
+export function isIgnoredImportPath(filePath) {
+  return String(filePath)
+    .split('/')
+    .some((segment) => segment.startsWith('.') || IGNORED_SEGMENTS.has(segment.toLowerCase()));
+}
+
+function cleanImportFiles(files) {
+  const seen = new Set();
+  const cleaned = [];
+  for (const file of files) {
+    if (!file || typeof file.path !== 'string') continue;
+    const filePath = file.path.replace(/\\/g, '/').replace(/^\.?\//, '');
+    if (!filePath || isIgnoredImportPath(filePath) || seen.has(filePath)) continue;
+    seen.add(filePath);
+    cleaned.push({
+      path: filePath,
+      content: file.content,
+      encoding: file.encoding === 'base64' ? 'base64' : 'utf8',
+    });
+  }
+  return cleaned;
+}
+
 async function finalizeFromFiles(files, { filename, overrides, format, hints = {} } = {}) {
-  const cleaned = files
-    .filter((file) => file && typeof file.path === 'string')
-    .map((file) => ({ path: file.path, content: file.content, encoding: file.encoding === 'base64' ? 'base64' : 'utf8' }));
-  if (cleaned.length === 0) throw new ArchiveError('没有可导入的文件');
+  const cleaned = cleanImportFiles(files);
+  if (cleaned.length === 0) throw new ArchiveError('没有可导入的文件（隐藏文件、.git、node_modules 等已被过滤）');
   const kind = overrides.kind || detectKind(cleaned) || 'skill';
   const fallbackName = hints.name || overrides.name || slugifyName(stemOf(filename), 'imported-package');
   let meta;

@@ -113,7 +113,9 @@ async function api(path, { method = 'GET', body } = {}) {
     }
   }
   if (!response.ok) {
-    const error = new Error(data?.error?.message || `HTTP ${response.status}`);
+    const firstError = data?.error?.details?.errors?.[0];
+    const suffix = firstError?.message ? `：${firstError.field ? `${firstError.field} ` : ''}${firstError.message}` : '';
+    const error = new Error((data?.error?.message || `HTTP ${response.status}`) + suffix);
     error.status = response.status;
     error.details = data?.error?.details ?? null;
     throw error;
@@ -1446,10 +1448,28 @@ async function onPublishFile(event) {
   }
 }
 
+const IGNORED_FOLDER_SEGMENTS = new Set(['node_modules', '__macosx', 'thumbs.db', 'desktop.ini']);
+function isIgnoredFolderPath(relative) {
+  return relative.split('/').some((segment) => segment.startsWith('.') || IGNORED_FOLDER_SEGMENTS.has(segment.toLowerCase()));
+}
+
 async function onPublishFolder(event) {
-  const files = [...(event.target.files || [])];
+  const allFiles = [...(event.target.files || [])];
   event.target.value = '';
-  if (files.length === 0) return;
+  if (allFiles.length === 0) return;
+  const skipped = [];
+  const files = allFiles.filter((file) => {
+    const relative = file.webkitRelativePath.split('/').slice(1).join('/') || file.name;
+    if (isIgnoredFolderPath(relative)) {
+      skipped.push(relative);
+      return false;
+    }
+    return true;
+  });
+  if (files.length === 0) {
+    toast('文件夹里没有可导入的文件（.DS_Store、.git、node_modules 等会被忽略）', 'error');
+    return;
+  }
   const rootSegment = files[0].webkitRelativePath.split('/')[0] || 'imported-package';
   try {
     const entries = await Promise.all(
@@ -1462,7 +1482,7 @@ async function onPublishFolder(event) {
       method: 'POST',
       body: { files: entries },
     });
-    toast(`已导入 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核`, 'ok');
+    toast(`已导入 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核${skipped.length ? `（已忽略 ${skipped.length} 个隐藏/系统文件）` : ''}`, 'ok');
     state.view = 'market';
     render();
     refreshBadge();

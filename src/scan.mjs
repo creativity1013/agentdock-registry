@@ -1,11 +1,24 @@
 /**
  * 静态安全扫描：在发布前对能力包做启发式检查。
  * 原则：扫描结果只是审核辅助，不是安全保证；high 默认阻止发布，人工审核仍应关注上下文。
+ *
+ * 规则分类：
+ *   PI-xxx 提示注入 / 指令操纵（含中文变体、条件触发、伪造系统标签）
+ *   EX-xxx 网络外发 / 数据渗出
+ *   SEC-xxx 秘钥与凭据泄漏
+ *   SH-xxx 危险命令与执行
+ *   EXEC-xxx 动态执行 / 子进程（plugin 代码包主风险面）
+ *   PER-xxx 持久化 / 横向移动（rc 文件、计划任务、harness 配置）
+ *   HID-xxx 隐藏与混淆（零宽字符、Trojan Source、同形字、编码载荷）
+ *   MET-xxx 结构性检查（依赖文件路径与 kind：描述投毒、生命周期脚本、危险工具组合）
+ *   BIN-xxx 二进制
+ * 供应链层（抢注 / 更新突变）需要库内上下文，在 store.publish 中调用 scanChanges 完成。
  */
 export const SEVERITY_ORDER = { low: 0, medium: 1, high: 2 };
 export const SEVERITY_LABEL = { high: '高危', medium: '中危', low: '低危' };
 
 const RULES = [
+  /* ---------------------------- 提示注入 / 指令操纵 ---------------------------- */
   {
     id: 'PI-001',
     severity: 'high',
@@ -31,11 +44,57 @@ const RULES = [
     re: /(do not|don't|never)\s+(tell|inform|mention|reveal)\s+(the\s+)?(user|human)/gi,
   },
   {
+    id: 'PI-005',
+    severity: 'high',
+    title: '疑似提示注入（中文）：要求忽略/清除既有指令',
+    re: /(忽略|无视|跳过|清除|抛掉)[^\n]{0,12}(之前|以前|先前|以上|上面|上方|所有|全部|系统|开发者|历史)[^\n]{0,10}(指令|提示词|提示|规则|设定|约束|记忆)/g,
+  },
+  {
+    id: 'PI-006',
+    severity: 'medium',
+    title: '要求对用户隐瞒（中文）',
+    re: /(不要|别|不得|禁止|无需)[^\n]{0,6}(告诉|告知|透露|暴露|提及|显示|上报)(给)?(用户|人类|使用者)/g,
+  },
+  {
+    id: 'PI-007',
+    severity: 'high',
+    title: '伪造系统层标签 / 对话边界（提示注入常用）',
+    re: /<\|(?:im_start|im_end|endoftext|system|assistant|user)\|?>|<\/?(?:system|system_prompt)>|\[(?:INST|\/INST|ASST)\]/gi,
+  },
+  {
+    id: 'PI-008',
+    severity: 'medium',
+    title: '条件触发指令（延迟引爆形态）',
+    re: /((?:如果|当|若|一旦)[^\n]{0,40}(?:则|就|请|那么)[^\n]{0,30}(?:忽略|隐瞒|删除|执行|发送|上传|透露))|((?:if|when|whenever|once)[^\n]{0,80}\b(?:ignore|disregard|hide|conceal|exfiltrate|reveal|delete all)\b)/gi,
+  },
+
+  /* ---------------------------- 网络外发 / 数据渗出 ---------------------------- */
+  {
     id: 'EX-001',
     severity: 'medium',
     title: '提及将数据外发到网络',
     re: /(send|post|upload|exfiltrate|transmit)\b[^\n]{0,80}\b(https?:\/\/|webhook|email)/gi,
   },
+  {
+    id: 'EX-002',
+    severity: 'high',
+    title: '已知外传/收集端点',
+    re: /(webhook\.site|requestbin|pipedream\.net|ngrok\.(?:io|app|dev|pro)|pastebin\.com\/raw|transfer\.sh|file\.io|disc(?:ord)?app\.com\/api\/webhooks|hooks\.slack\.com\/services|api\.telegram\.org\/bot|burpcollaborator|oast\.(?:fun|pro|live|site)|interact\.sh)/gi,
+  },
+  {
+    id: 'EX-003',
+    severity: 'medium',
+    title: '整文件/数据体 POST 外发',
+    re: /(curl|wget|Invoke-RestMethod|Invoke-WebRequest)[^\n]{0,120}(--data(?:-binary)?(?:-raw)?|-d\s|--upload-file|-T\s|--form|-F\s)\s*@?[^\n]{0,80}/gi,
+  },
+  {
+    id: 'EX-004',
+    severity: 'medium',
+    title: '调用第三方 LLM API（可能外送上下文）',
+    re: /(api\.(?:openai|anthropic|deepseek|moonshot|xai|groq|mistral)\.com|generativelanguage\.googleapis\.com|dashscope\.aliyuncs\.com|openrouter\.ai\/api)/gi,
+  },
+
+  /* ---------------------------- 秘钥与凭据 ---------------------------- */
   {
     id: 'SEC-001',
     severity: 'high',
@@ -52,7 +111,7 @@ const RULES = [
     id: 'SEC-003',
     severity: 'high',
     title: '可能包含私钥',
-    re: /-----BEGIN (?:(?:RSA|EC|OPENSSH|DSA) )?PRIVATE KEY-----/g,
+    re: /-----BEGIN (?:(?:RSA|EC|OPENSSH|DSA|PGP) )?PRIVATE KEY(?: BLOCK)?-----/g,
   },
   {
     id: 'SEC-004',
@@ -67,6 +126,32 @@ const RULES = [
     re: /(?:\.ssh\/|id_rsa|\.aws\/credentials|\.npmrc|\.netrc)/g,
   },
   {
+    id: 'SEC-006',
+    severity: 'high',
+    title: '可能包含现代模型/支付/CI 服务的密钥',
+    re: /(sk-proj-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-svcacct-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35}|sk_live_[0-9a-zA-Z]{16,}|rk_live_[0-9a-zA-Z]{16,}|glpat-[0-9A-Za-z_-]{20,}|dop_v1_[0-9a-f]{64}|nfp_[A-Za-z0-9]{40})/g,
+  },
+  {
+    id: 'SEC-007',
+    severity: 'high',
+    title: '带明文凭据的数据库/消息队列连接串',
+    re: /(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|mssql):\/\/[^\s:@/'"]+:[^\s@/'"]+@/gi,
+  },
+  {
+    id: 'SEC-008',
+    severity: 'medium',
+    title: '疑似 JWT 令牌',
+    re: /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{5,}/g,
+  },
+  {
+    id: 'SEC-009',
+    severity: 'medium',
+    title: '疑似 Telegram/Discord bot 令牌',
+    re: /([0-9]{8,10}:[A-Za-z0-9_-]{35})|([A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27})/g,
+  },
+
+  /* ---------------------------- 危险命令 ---------------------------- */
+  {
     id: 'SH-001',
     severity: 'high',
     title: '高危删除命令',
@@ -76,7 +161,7 @@ const RULES = [
     id: 'SH-002',
     severity: 'high',
     title: '管道执行远程脚本',
-    re: /\b(?:curl|wget)\b[^\n|;]{0,200}\|\s*(?:ba|z|k|da)?sh\b/g,
+    re: /\b(?:curl|wget)\b[^\n|;]{0,200}\|\s*(?:ba|z|k|da|fi)?sh\b/g,
   },
   {
     id: 'SH-003',
@@ -100,14 +185,68 @@ const RULES = [
     id: 'SH-006',
     severity: 'medium',
     title: '禁用安全限制的启动参数',
-    re: /--dangerously-skip-permissions|--no-sandbox/g,
+    re: /--dangerously-skip-permissions|--no-sandbox|--yolo\b/g,
   },
+  {
+    id: 'SH-007',
+    severity: 'high',
+    title: '反弹 shell',
+    re: /\bbash\s+-i\s*>&\s*\/dev\/tcp\/|\/dev\/tcp\/[^\s]+\/\d{2,5}|\bnc(?:\.exe)?\b[^\n]{0,40}\s-e\s|\bmkfifo\b[^\n]{0,60}\bnc\b/g,
+  },
+  {
+    id: 'SH-008',
+    severity: 'high',
+    title: 'base64 解码后执行（混淆载荷）',
+    re: /\bbase64\b[^\n]{0,40}(?:-d|--decode|-D\b)[^\n]{0,60}\|\s*(?:ba|z|k|da|fi)?sh\b|\|\s*base64\s+(?:-d|--decode)\s*\|\s*(?:ba|z|k)?sh\b/g,
+  },
+
+  /* ---------------------------- 动态执行 / 子进程 ---------------------------- */
+  {
+    id: 'EXEC-001',
+    severity: 'medium',
+    title: '动态执行 / 子进程调用（plugin 代码需重点人工确认）',
+    re: /\beval\s*\(|new\s+Function\s*\(|require\(\s*['"]child_process['"]\s*\)|from\s+['"]node:child_process['"]|\bchild_process\b|\bspawn(?:Sync)?\s*\(|\bexec(?:Sync)?\s*\(|os\.system\s*\(|subprocess\./g,
+  },
+  {
+    id: 'EXEC-002',
+    severity: 'medium',
+    title: '下载后赋可执行权限（下载器形态）',
+    re: /\bchmod\s+(?:-R\s+)?\+x\b|\bchmod\s+[0-7]{3,4}\s+\S+\s*&&/g,
+  },
+
+  /* ---------------------------- 持久化 / 横向移动 ---------------------------- */
+  {
+    id: 'PER-001',
+    severity: 'high',
+    title: '写入 shell 启动文件 / 计划任务 / authorized_keys（持久化）',
+    re: /((?:>>|>|\btee\b|\bcp\b|\bmv\b)[^\n]{0,40}\.(?:zshrc|bashrc|bash_profile|zprofile|ssh\/authorized_keys|profile\b))|(\bcrontab\b\s+(?:-[elrx]\b|[-\w]{0,10}install))|(\blaunchctl\s+(?:load|enable)\b)|(systemctl\s+--now\s+enable)/g,
+  },
+  {
+    id: 'PER-002',
+    severity: 'high',
+    title: '写入/篡改 harness 配置（后续会话劫持）',
+    re: /((?:>>|>|\btee\b|\bcp\b|\bmv\b|写入|追加|覆盖|修改)[^\n]{0,30}(?:\.claude|\.codex|\.cursor|\.gemini|\.continue|CLAUDE\.md|AGENTS\.md|\.mcp\.json))|((?:~|\/Users\/|\$HOME|\/home\/)[^\n\s]{0,20}\.(?:claude|codex|cursor|gemini|continue)\/[^\n\s]{0,50}(?:settings|config|mcp|memory|credentials|CLAUDE))/g,
+  },
+  {
+    id: 'PER-003',
+    severity: 'medium',
+    title: '引用 harness 配置 / 用户指令文件路径',
+    re: /(?:~\/|\$HOME\/|\/Users\/[^\s/]+\/|\/home\/[^\s/]+\/)?(?:\.claude|\.codex|\.cursor|\.gemini|\.continue)\b|CLAUDE\.md|AGENTS\.md|\.mcp\.json/g,
+  },
+  {
+    id: 'PER-004',
+    severity: 'medium',
+    title: '诱导安装第三方依赖（交付链投毒面）',
+    re: /\b(?:npm|pnpm|yarn|bun|bunx|npx|pip3?)\s+(?:install|i|add)\s+[A-Za-z@][^\n]{0,60}|\bbrew\s+install\s+[^\n]{0,40}/g,
+  },
+
+  /* ---------------------------- 隐藏与混淆 ---------------------------- */
   {
     id: 'HID-001',
     severity: 'high',
     title: 'HTML 注释中隐藏指令',
     text: (text) => {
-      const re = /<!--[\s\S]{0,600}?(?:ignore|disregard|instruction|password|token|secret|system prompt)/gi;
+      const re = /<!--[\s\S]{0,600}?(?:ignore|disregard|instruction|password|token|secret|system prompt|指令|密钥|密码)/gi;
       const matches = [];
       let match;
       while ((match = re.exec(text)) !== null) {
@@ -121,7 +260,7 @@ const RULES = [
     id: 'HID-002',
     severity: 'medium',
     title: '不可见字符（零宽字符）',
-    line: (line) => /[\u200b-\u200f\u2060\ufeff\u00ad]{3,}/.test(line),
+    line: (line) => /[​-‏⁠﻿­]{3,}/.test(line),
   },
   {
     id: 'HID-003',
@@ -139,12 +278,36 @@ const RULES = [
     },
   },
   {
+    id: 'HID-004',
+    severity: 'high',
+    title: 'Trojan Source：双向文本控制符',
+    line: (line) => /[‪-‮⁦-⁩]/.test(line),
+  },
+  {
+    id: 'HID-005',
+    severity: 'medium',
+    title: '西里尔字母与拉丁字母混排（同形字攻击）',
+    line: (line) => /[Ѐ-ӿ]/.test(line) && /[a-z]/i.test(line),
+  },
+  {
+    id: 'HID-006',
+    severity: 'medium',
+    title: '字符串拼接动态执行（拆分混淆）',
+    re: /\b(?:eval|exec|Function)\s*\(\s*['"`][^'"`\n]{0,40}['"`]\s*\+/g,
+  },
+
+  /* ---------------------------- 环境变量密钥 ---------------------------- */
+  {
     id: 'NET-001',
     severity: 'low',
     title: '脚本中读取环境变量中的密钥',
-    re: /process\.env\.[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)/g,
+    re: /process\.env\.[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)|os\.environ(?:\.get)?\(?['"][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)|ENV\[['"][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)/g,
   },
 ];
+
+const DESCRIPTION_POISON_RE = /(ignore|disregard|instruction|secret|password|token|credential|exfiltrat|发送|上传|上传到|外发|指令|忽略|隐瞒|凭据|密钥|密码)/i;
+const AGENT_TOOLS_RE = /^\s*(?:tools|allowed-tools|allowed_tools)\s*:\s*(.+)$/im;
+const PLUGIN_LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare', 'prepublish'];
 
 function lineOfIndex(text, index) {
   let line = 1;
@@ -166,6 +329,126 @@ function pushFinding(findings, rule, file, line, snippet, seen) {
     line,
     snippet: String(snippet || '').replace(/\s+/g, ' ').trim().slice(0, 160),
   });
+}
+
+function summarize(findings) {
+  const summary = { high: 0, medium: 0, low: 0, total: findings.length };
+  for (const finding of findings) summary[finding.severity] += 1;
+  return summary;
+}
+
+/* ------------------------------ 结构性检查（文件路径 / kind 感知） ------------------------------ */
+
+function structuralChecks(findings, seen, bundle, file, text) {
+  const base = file.path.split('/').pop().toLowerCase();
+
+  // .env / 凭据类文件整体被打包
+  if (/^\.env(\.|$)/i.test(base) || /^(?:secrets?|credentials?)(?:[-_.][^/]*)?\.(?:json|txt|ya?ml|ini|toml)$/i.test(base) || base === '.npmrc' || base === '.netrc') {
+    pushFinding(
+      findings,
+      { id: 'SEC-010', severity: 'medium', title: '敏感配置/凭据文件被打包' },
+      file.path,
+      1,
+      `<file ${file.path}>`,
+      seen,
+    );
+  }
+
+  // 描述字段投毒：模型会读 frontmatter 的 description，人往往只扫正文
+  if (/^(?:skill\.md|agent\.md)$/i.test(base)) {
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s*(?:description|说明)\s*:\s*(.{0,400})/i.test(lines[i]) && DESCRIPTION_POISON_RE.test(lines[i])) {
+        pushFinding(
+          findings,
+          { id: 'MET-001', severity: 'high', title: 'manifest 描述字段含指令/敏感词（描述投毒）' },
+          file.path,
+          i + 1,
+          lines[i],
+          seen,
+        );
+      }
+    }
+  }
+
+  // plugin 生命周期脚本：npm 安装即执行，经典供应链攻击面
+  if (bundle.kind === 'plugin' && base === 'package.json') {
+    try {
+      const manifest = JSON.parse(text);
+      const scripts = manifest?.scripts;
+      if (scripts && typeof scripts === 'object') {
+        for (const hook of PLUGIN_LIFECYCLE_SCRIPTS) {
+          if (typeof scripts[hook] === 'string' && scripts[hook].trim()) {
+            pushFinding(
+              findings,
+              { id: 'MET-002', severity: 'high', title: `npm 生命周期脚本（${hook}）—— 安装即执行` },
+              file.path,
+              1,
+              `"${hook}": ${scripts[hook]}`,
+              seen,
+            );
+          }
+        }
+      }
+    } catch {
+      /* package.json 非法 JSON 由结构校验负责 */
+    }
+  }
+
+  // agent 危险工具组合：shell + 网络
+  if (bundle.kind === 'agent' && /^(?:agent\.md)$/i.test(base)) {
+    const match = AGENT_TOOLS_RE.exec(text);
+    if (match) {
+      const tools = match[1].toLowerCase();
+      const hasShell = /\b(bash|shell|terminal|execute|command)\b/.test(tools);
+      const hasNetwork = /\b(web|fetch|http|search|browser)\b/.test(tools);
+      if (hasShell && hasNetwork) {
+        pushFinding(
+          findings,
+          { id: 'MET-003', severity: 'medium', title: '危险工具组合：shell + 网络访问' },
+          file.path,
+          lineOfIndex(text, match.index),
+          match[0],
+          seen,
+        );
+      }
+    }
+  }
+}
+
+/* ------------------------------ 主扫描 ------------------------------ */
+
+function scanPiece(findings, seen, rules, filePath, text) {
+  const lines = text.split('\n');
+  for (const rule of rules) {
+    if (findings.length > 200) break;
+    if (rule.line) {
+      for (let i = 0; i < lines.length; i++) {
+        if (rule.line(lines[i])) {
+          pushFinding(findings, rule, filePath, i + 1, lines[i], seen);
+        }
+      }
+      continue;
+    }
+    if (rule.text) {
+      const matches = rule.text(text);
+      for (const match of matches) {
+        pushFinding(findings, rule, filePath, lineOfIndex(text, match.index), match.snippet, seen);
+      }
+      continue;
+    }
+    if (rule.re) {
+      const re = new RegExp(rule.re.source, rule.re.flags);
+      for (let i = 0; i < lines.length; i++) {
+        let match;
+        while ((match = re.exec(lines[i])) !== null) {
+          pushFinding(findings, rule, filePath, i + 1, match[0], seen);
+          if (match.index === re.lastIndex) re.lastIndex++;
+          break;
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -193,46 +476,27 @@ export function scanBundle(bundle) {
     textBudget += text.length;
     if (textBudget > 8 * 1024 * 1024) break; // 扫描预算上限
 
-    const lines = text.split('\n');
-    for (const line of lines) {
-      // 快速跳过：没有可疑关键词的行仍要过正则，但控制单文件行数上限
-      if (findings.length > 200) break;
-    }
-
-    for (const rule of RULES) {
-      if (findings.length > 200) break;
-      if (rule.line) {
-        for (let i = 0; i < lines.length; i++) {
-          if (rule.line(lines[i])) {
-            pushFinding(findings, rule, file.path, i + 1, lines[i], seen);
-          }
-        }
-        continue;
-      }
-      if (rule.text) {
-        const matches = rule.text(text);
-        for (const match of matches) {
-          pushFinding(findings, rule, file.path, lineOfIndex(text, match.index), match.snippet, seen);
-        }
-        continue;
-      }
-      if (rule.re) {
-        const re = new RegExp(rule.re.source, rule.re.flags);
-        for (let i = 0; i < lines.length; i++) {
-          let match;
-          while ((match = re.exec(lines[i])) !== null) {
-            pushFinding(findings, rule, file.path, i + 1, match[0], seen);
-            if (match.index === re.lastIndex) re.lastIndex++;
-            break;
-          }
-        }
-      }
-    }
+    structuralChecks(findings, seen, bundle, file, text);
+    scanPiece(findings, seen, RULES, file.path, text);
+    if (findings.length > 200) break;
   }
 
-  const summary = { high: 0, medium: 0, low: 0, total: findings.length };
-  for (const finding of findings) summary[finding.severity] += 1;
-  return { findings, summary };
+  return { findings, summary: summarize(findings) };
+}
+
+/**
+ * 对「相对上一版本新增的内容」做定向扫描（供应链：更新突变检测）。
+ * 供 store.publish 在存在旧版本时调用：pieces = [{ path, text }]，
+ * path 为新文件路径或被修改文件中新增的行文本。
+ */
+export function scanChanges(pieces) {
+  const findings = [];
+  const seen = new Set();
+  for (const piece of pieces) {
+    scanPiece(findings, seen, RULES, piece.path, piece.text);
+    if (findings.length > 200) break;
+  }
+  return { findings, summary: summarize(findings) };
 }
 
 /**

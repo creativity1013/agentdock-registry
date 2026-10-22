@@ -85,6 +85,38 @@ test('文件夹上传（files JSON）：自动识别 skill', async () => {
   assert.equal(data.package.name, 'imported-skill');
 });
 
+test('文件夹上传：自动过滤 .DS_Store/.git/node_modules 等隐藏系统文件', async () => {
+  const response = await fetch(`${server.url}/api/v1/import?filename=my-folder.json&version=0.1.5`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${publisher}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        { path: '.DS_Store', content: 'junk', encoding: 'utf8' },
+        { path: '.git/config', content: '[core]', encoding: 'utf8' },
+        { path: 'node_modules/a/index.js', content: 'module.exports=1', encoding: 'utf8' },
+        { path: '__MACOSX/._SKILL.md', content: 'junk', encoding: 'utf8' },
+        { path: 'SKILL.md', content: SKILL_MD, encoding: 'utf8' },
+      ],
+    }),
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(data.package.kind, 'skill');
+  assert.equal(data.version.files.length, 1);
+  assert.equal(data.version.files[0].path, 'SKILL.md');
+});
+
+test('文件夹上传：过滤后没有文件时返回清晰错误', async () => {
+  const { status, data } = await upload('empty-folder.json', JSON.stringify({
+    files: [
+      { path: '.DS_Store', content: 'junk', encoding: 'utf8' },
+      { path: '.git/HEAD', content: 'ref', encoding: 'utf8' },
+    ],
+  }), 'application/json');
+  assert.equal(status, 422);
+  assert.match(data.error.message, /没有可导入的文件/);
+});
+
 test('dryRun：只预览不落库', async () => {
   const before = await fetch(`${server.url}/api/v1/packages?pageSize=100`).then((res) => res.json());
   const response = await fetch(`${server.url}/api/v1/import?dryRun=1&filename=dry.zip&name=dry-skill&version=0.1.0`, {

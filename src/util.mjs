@@ -103,3 +103,33 @@ export function formatDate(iso) {
 export function hasDuplicates(values) {
   return new Set(values).size !== values.length;
 }
+
+/**
+ * 判断 a/b 的编辑距离是否 ≤ max（Damerau-Levenshtein 带提前退出），
+ * 用于包名抢注（typosquatting）检测。
+ */
+export function editDistanceLE(a, b, max) {
+  if (a === b) return true;
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > max) return false;
+  let prev2 = null;
+  let prev = Array.from({ length: lb + 1 }, (_, j) => j);
+  for (let i = 1; i <= la; i += 1) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= lb; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, prev2[j - 2] + 1);
+      }
+      cur[j] = value;
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > max) return false; // 整行最小值都超限，提前退出
+    prev2 = prev;
+    prev = cur;
+  }
+  return prev[lb] <= max;
+}
