@@ -436,7 +436,7 @@ CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 |---|---|---|
 | 目录 | 直接发布一个本地目录（传统方式） | 根目录 `SKILL.md` / `agent.md` / `plugin.json` |
 | JSON bundle | `{kind,name,version,files:[…]}` | JSON 自带字段 |
-| 文件夹上传 | Web 选择整个文件夹（`webkitdirectory`），浏览器打包成 `{files:[…]}` | 同上，服务端自动识别 |
+| 文件夹上传 | Web 选择整个文件夹（`webkitdirectory`），浏览器打包成 `{files:[…]}`；单次建议 ≤100MB | 同上，服务端自动识别 |
 | `.zip` | Agent Skills 市场、GitHub「Download ZIP」等常见打包 | 自动剥离 GitHub 的单层根目录；识别根目录清单 |
 | `.tar.gz` / `.tgz` / `.tar` | npm/脚本发布物常用格式 | 同上 |
 | 单文件 `.md` | Agent Skills / Claude Code agent 的裸文件 | frontmatter 有 `tools`/`model` 判定为 agent，否则 skill |
@@ -453,7 +453,7 @@ agentdock publish examples/bundles/plugin-ops-kit.tar.gz --version 0.1.1
 agentdock publish examples/bundles/agent-code-reviewer.md --dry-run
 ```
 
-安全与限制：归档解压总上限 8MB、单文件 4MB、最多 500 个条目，并检查压缩比防 zip bomb；隐藏目录（`.git`/`.github`/`__MACOSX` 等）、`node_modules`、`..` 与绝对路径一律丢弃；gz 解压使用 `maxOutputLength` 限流。解析失败返回 422，其余校验/扫描/审核流程与普通发布完全一致。原始文件不落盘，只在内存中转换为 bundle 后走统一 pipeline。
+安全与限制：单个包（含折叠上传）总量上限 **100MB**、单文件 50MB、最多 2000 个条目；原始上传请求上限 150MB（为 base64 JSON 留出膨胀空间）。归档解压全程检查压缩比防 zip bomb；隐藏目录（`.git`/`.github`/`__MACOSX` 等）、`node_modules`、`..` 与绝对路径一律丢弃；gz 解压使用 `maxOutputLength` 限流。解析失败返回 422，其余校验/扫描/审核流程与普通发布完全一致。原始文件不落盘，只在内存中转换为 bundle 后走统一 pipeline。
 
 ## 导入 Claude Code agents
 
@@ -494,7 +494,7 @@ agentdock sync export --out marketplace.json               # 中立市场目录
 - **MCP registry**：server 的 `remotes[].url` 与 `packages[].identifier` 转换为 `plugin.json` 的 `mcp[]` 声明（`url` / `command`），原始 server 元数据保留为 `registry-source.json` 供追溯。
 - **skills.sh**：技能本体就是标准 `SKILL.md`，可直接用 GitHub 导入其对应仓库目录；平台不伪造非公开 API。
 
-安全边界（避免把服务变成 SSRF 跳板）：外部 base URL 只能来自服务端环境变量 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY`，请求体只接受 `repo` / `path` / `ref` / `name` 等标识符，不接受任意 URL；单次导入限制 200 文件、单文件 512KB、总量 2MB，网络请求 15s 超时；导入需要 publisher 权限，并写审计 `sync.import`。
+安全边界（避免把服务变成 SSRF 跳板）：外部 base URL 只能来自服务端环境变量 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY`，请求体只接受 `repo` / `path` / `ref` / `name` 等标识符，不接受任意 URL；远端仓库导入仍保持保守上限（单次 200 文件、单文件 512KB、总量 2MB；本地/文件夹导入则为 100MB 总量），网络请求 15s 超时；导入需要 publisher 权限，并写审计 `sync.import`。
 
 导出格式（`GET /api/v1/registry/export`）是中立目录 `agentdock-marketplace@1`：每个已发布能力包的最新版本包含 `bundleUrl`、`contentHash`、平台签名与发布者签名摘要，`digest` 为整体哈希；其他 harness 可按需映射到自己的 marketplace 清单。
 

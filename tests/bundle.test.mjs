@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeBundle, sanitizePath, isValidName, readBundleFromDirectory } from '../src/bundle.mjs';
+import { normalizeBundle, sanitizePath, isValidName, readBundleFromDirectory, LIMITS } from '../src/bundle.mjs';
 
 function payload(overrides = {}) {
   return {
@@ -47,7 +47,8 @@ test('normalizeBundle 校验名称、版本、类型与文件大小', () => {
   assert.equal(normalizeBundle(payload({ name: 'Bad Name' })).ok, false);
   assert.equal(normalizeBundle(payload({ version: 'v1' })).ok, false);
   assert.equal(normalizeBundle(payload({ files: [] })).ok, false);
-  assert.equal(normalizeBundle(payload({ files: [{ path: 'big.txt', content: 'x'.repeat(600 * 1024) }] })).ok, false);
+  const tooMany = Array.from({ length: LIMITS.maxFiles + 1 }, (_, index) => ({ path: `f${index}.txt`, content: 'x' }));
+  assert.equal(normalizeBundle(payload({ files: tooMany })).ok, false);
 });
 
 test('normalizeBundle 支持 base64 文件', () => {

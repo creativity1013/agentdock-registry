@@ -8,7 +8,8 @@ import { readArchive, ArchiveError, ARCHIVE_LIMITS } from './archive.mjs';
 import { detectKind, describeImportedFiles, slugifyName } from './registry.mjs';
 import { parseFrontmatter } from './yaml.mjs';
 
-export const MAX_IMPORT_BYTES = ARCHIVE_LIMITS.maxTotalBytes;
+// 原始上传上限（含 base64 JSON 约 4/3 膨胀），解码后的包总大小仍由 bundle LIMITS（100MB）把关
+export const MAX_IMPORT_BYTES = 150 * 1024 * 1024;
 
 export function importFromError(error) {
   return error instanceof ArchiveError;

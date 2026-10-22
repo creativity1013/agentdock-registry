@@ -10,9 +10,9 @@ export const KIND_LABEL = { skill: '技能', agent: '智能体', plugin: '插件
 export const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
 export const LIMITS = {
-  maxFiles: 200,
-  maxFileBytes: 512 * 1024,
-  maxTotalBytes: 2 * 1024 * 1024,
+  maxFiles: 2000,
+  maxFileBytes: 50 * 1024 * 1024,
+  maxTotalBytes: 100 * 1024 * 1024,
   maxPathLength: 180,
   maxDescription: 1024,
   maxTags: 10,

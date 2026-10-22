@@ -36,7 +36,7 @@ test('ZIP：条目过大与非法输入抛 ArchiveError', () => {
   // 手工把中央目录与本地头里的 uncompressed size 改成超大值
   const central = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
   zip.writeUInt32LE(9 * 1024 * 1024, central + 24);
-  assert.throws(() => readZip(zip), /条目过大/);
+  assert.throws(() => readZip(zip, { maxEntryBytes: 1024, maxTotalBytes: 1024 }), /条目过大/);
 });
 
 test('TAR.GZ：读取常规文件并剥离单根目录', () => {

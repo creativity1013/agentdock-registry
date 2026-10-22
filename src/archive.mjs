@@ -6,9 +6,9 @@
 import zlib from 'node:zlib';
 
 export const ARCHIVE_LIMITS = {
-  maxEntries: 500,
-  maxEntryBytes: 4 * 1024 * 1024,
-  maxTotalBytes: 8 * 1024 * 1024,
+  maxEntries: 2000,
+  maxEntryBytes: 50 * 1024 * 1024,
+  maxTotalBytes: 100 * 1024 * 1024,
   maxPathLength: 200,
   maxRatio: 200,
 };
