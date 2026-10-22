@@ -623,7 +623,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - **发布者签名（可选）**：`publish --key` 用发布者自己持有的 ed25519 私钥对载荷 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥发布时自动 TOFU 注册（等价于 `POST /api/v1/me/keys`）。签名覆盖内容哈希，因此可证明「该版本由持有对应私钥的人提交」。
 - **可验证透明日志**：每个版本审核通过时向 `data/transparency.log` 追加一条哈希链事件（contentHash、发布者、平台 keyId、发布者 keyId、审核人），事件哈希按 RFC 6962 风格构造 Merkle 树；任何人可通过 `GET /api/v1/transparency/verify` 校验整条链、通过 `GET .../proof` 获取某个版本的包含证明，并用 CLI `transparency verify|proof` 本地校验。日志 append-only，与平台签名交叉印证上架历史。
 - **SBOM 与自动审批**：每个版本生成 `agentdock-sbom@1` 清单，记录文件哈希与声明的工具/MCP/技能组件；自动审批默认关闭，开启后只对策略白名单内、无高危、体积达标的版本生效，自动通过的版本同样有平台签名、透明日志与审计，可事后完整追溯。
-- 外部 registry 导入受服务端出口白名单限制（见上节），导入内容一律走同一校验/扫描流程，只有命中自动审批策略时才会跳过人工审核；当前无 SSO/多租户。
+- 外部 registry 导入受服务端出口白名单限制（见上节），导入内容一律走同一校验/扫描流程，只有命中自动审批策略时才会跳过人工审核；审计与透明日志为全局视图（不按租户分区），当前无租户级策略与配额。
 - diff 视图只做行级对比：二进制文件仅标记变化，超大文件（>512KB 或 >2000 行）退化为整文件标记。
 
 ## Roadmap
