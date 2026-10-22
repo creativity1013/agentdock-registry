@@ -335,6 +335,7 @@ function printAnalysis(report) {
     for (const finding of report.scan.findings.slice(0, 12)) {
       const location = finding.line ? `${finding.file}#L${finding.line}` : finding.file;
       lines.push(`  - [${finding.severity}] ${finding.ruleId} ${finding.title}（${location}）`);
+      if (finding.condition) lines.push(`      触发条件：${finding.condition}`);
       if (finding.reason) lines.push(`      为什么判定：${finding.reason}`);
     }
     if (report.scan.findings.length > 12) lines.push(`  … 另有 ${report.scan.findings.length - 12} 条`);
@@ -556,6 +557,7 @@ async function preflightInstall(conn, bundle, flags) {
     for (const finding of report.scan.findings.slice(0, 3)) {
       const location = finding.line ? `${finding.file}:${finding.line}` : finding.file;
       console.log(`  ! [${finding.severity}] ${finding.ruleId} ${location} ${finding.title}`);
+      if (finding.condition) console.log(`    触发条件：${finding.condition}`);
       if (finding.reason) console.log(`    为什么判定：${finding.reason}`);
     }
     if (report.blocked && !flags['allow-risk']) {

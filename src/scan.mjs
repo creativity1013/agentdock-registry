@@ -35,6 +35,63 @@ const GROUP_REASON = {
   SUP: '判定依据：供应链风险（名称抢注、更新突变、依赖路径异常）',
 };
 
+/** 每条规则的「触发条件」：出错时告诉用户到底是命中了什么 */
+const RULE_CONDITIONS = {
+  'PI-001': '文本中出现“ignore previous instructions”一类要求忽略既有指令的语句',
+  'PI-002': '要求忽略系统/开发者提示（disregard / forget system prompt 等）',
+  'PI-003': '出现“you are now DAN / developer mode”等越狱措辞',
+  'PI-004': '要求不向用户告知或隐瞒行为的语句',
+  'PI-005': '中文语句要求忽略、跳过或清除既有指令/记忆',
+  'PI-006': '中文语句要求不要告诉或透露给用户',
+  'PI-007': '伪造 <|im_start|>、<system>、[INST] 等对话边界标签',
+  'PI-008': '条件触发的延迟指令（“如果…就忽略/外发”等）',
+  'EX-001': '提及 send/post/upload 到 URL、webhook 或邮箱地址',
+  'EX-002': '出现已知的数据收集/外传端点',
+  'EX-003': '把文件或数据整段 POST 到外部地址',
+  'EX-004': '调用第三方 LLM API，可能外送上下文',
+  'SEC-001': '出现 AWS Access Key（AKIA…）格式',
+  'SEC-002': '出现 GitHub Token（ghp_ / gho_ 等）格式',
+  'SEC-003': '出现私钥块（BEGIN PRIVATE KEY 等）',
+  'SEC-004': '出现常见 API Key 格式',
+  'SEC-005': '脚本读取 ~/.aws、~/.ssh、.env 等敏感凭据路径',
+  'SEC-006': '出现模型/支付/CI 服务的密钥格式',
+  'SEC-007': '出现带明文用户名密码的数据库或消息队列连接串',
+  'SEC-008': '出现 JWT 格式令牌',
+  'SEC-009': '出现 Telegram / Discord bot token 格式',
+  'SEC-010': '包内打包了 .env、credentials 等敏感配置文件',
+  'SH-001': '出现 rm -rf / 等高危删除命令',
+  'SH-002': 'curl / wget 管道直接执行远程脚本',
+  'SH-003': '出现 fork bomb（:(){:|:&};:）',
+  'SH-004': '使用 sudo 提权执行',
+  'SH-005': 'chmod 777 放开所有权限',
+  'SH-006': '使用 --dangerously-skip-permissions、--no-sandbox 等禁用安全限制的参数',
+  'SH-007': '反弹 shell（/dev/tcp、nc -e 等）',
+  'SH-008': 'base64 解码后直接执行（混淆载荷）',
+  'EXEC-001': '出现 exec / spawn / eval 等动态执行或子进程调用',
+  'EXEC-002': '下载文件后 chmod +x 赋可执行权限（下载器形态）',
+  'PER-001': '写入 .bashrc/.zshrc、crontab、authorized_keys 等持久化位置',
+  'PER-002': '写入或篡改 harness 配置（如 ~/.claude/settings.json）',
+  'PER-003': '引用 harness 配置或用户指令文件路径（CLAUDE.md、AGENTS.md 等）',
+  'PER-004': '诱导安装第三方依赖（npm / pip install 等）',
+  'HID-001': 'HTML 注释中出现隐藏指令',
+  'HID-002': '出现零宽字符等不可见字符',
+  'HID-003': '出现超长 base64 块，可能隐藏载荷',
+  'HID-004': '出现 Trojan Source 双向文本控制符',
+  'HID-005': '西里尔字母与拉丁字母混排（同形字攻击）',
+  'HID-006': '字符串拼接后动态执行（拆分混淆）',
+  'NET-001': '脚本读取环境变量中的密钥/令牌',
+  'MET-001': 'manifest 的 name/description 含指令或敏感词（描述投毒）',
+  'MET-002': 'package.json 含 install/postinstall 等生命周期脚本，安装即执行',
+  'MET-003': '同时具备 shell 执行与网络访问能力（危险工具组合）',
+  'BIN-001': '包含二进制文件，无法做静态内容审查',
+  'SUP-001': '包名与已有包编辑距离 ≤2，存在名称抢注嫌疑',
+  'SUP-002': '新版本相对基线新增内容命中安全规则（更新突变）',
+};
+
+export function conditionOf(ruleId, title = '') {
+  return RULE_CONDITIONS[ruleId] || title;
+}
+
 /** 给一条扫描发现生成「为什么被判定为这个等级」的说明 */
 export function explainFinding(ruleId, severity) {
   const group = GROUP_REASON[String(ruleId).split('-')[0]] || '判定依据：命中静态安全扫描规则';
@@ -354,6 +411,7 @@ function pushFinding(findings, rule, file, line, snippet, seen) {
     line,
     snippet: String(snippet || '').replace(/\s+/g, ' ').trim().slice(0, 160),
     reason: explainFinding(rule.id, rule.severity),
+    condition: conditionOf(rule.id, rule.title),
   });
 }
 

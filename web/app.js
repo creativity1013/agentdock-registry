@@ -115,6 +115,31 @@ function ruleGroup(ruleId) {
 const SEV_ORDER = { high: 0, medium: 1, low: 2 };
 
 /** 扫描发现列表（按严重度排序，含规则组与命中片段）；详情页与审核队列共用 */
+const SEV_CN = { high: '高危', medium: '中危', low: '低危' };
+
+/** 当前版本的判定结论：具体触发了哪些条件，从而判定为高/中/低危 */
+function scanVerdictBlock(scan) {
+  const findings = scan?.findings || [];
+  if (findings.length === 0) return null;
+  const counts = { high: 0, medium: 0, low: 0 };
+  for (const item of findings) counts[item.severity] = (counts[item.severity] || 0) + 1;
+  const level = counts.high ? 'high' : counts.medium ? 'medium' : 'low';
+  const rows = [];
+  for (const sev of ['high', 'medium', 'low']) {
+    if (counts[sev] === 0) {
+      rows.push(h('div', { class: 'verdict-row muted' }, `未触发${SEV_CN[sev]}条件`));
+      continue;
+    }
+    rows.push(h('div', { class: 'verdict-row' }, `触发 ${counts[sev]} 条${SEV_CN[sev]}条件：`));
+    for (const item of findings.filter((x) => x.severity === sev)) {
+      rows.push(h('div', { class: 'verdict-cond' }, `· ${item.ruleId} ${item.condition || item.title}`, h('span', { class: 'muted' }, `（${item.file}${item.line ? `#L${item.line}` : ''}）`)));
+    }
+  }
+  return h('div', { class: 'scan-verdict' },
+    h('div', { class: 'verdict-head' }, `当前版本判定：`, h('span', { class: `sev ${level}` }, SEV_CN[level]), h('span', { class: 'muted' }, '（取命中条件中的最高等级）')),
+    ...rows);
+}
+
 function scanLegend() {
   return h('div', { class: 'scan-legend' },
     h('div', { class: 'legend-item' }, h('span', { class: 'sev high' }, '高危'), '可能导致凭据泄漏、命令执行或劫持 agent 行为；默认阻止发布，必须人工确认'),
@@ -127,6 +152,7 @@ function findingsList(scan) {
   if (findings.length === 0) return [h('span', { class: 'muted' }, '未发现问题（静态规则级扫描，不代表绝对安全）')];
   return [
     scanLegend(),
+    scanVerdictBlock(scan),
     ...findings.map((finding) =>
       h(
         'div',
@@ -141,7 +167,7 @@ function findingsList(scan) {
           h('span', { class: 'muted' }, `${finding.file}${finding.line ? `#L${finding.line}` : ''}`),
         ),
         finding.snippet ? h('div', { class: 'snippet mono' }, finding.snippet) : null,
-        finding.reason ? h('div', { class: 'finding-reason' }, `为什么判定：${finding.reason}`) : null,
+        h('div', { class: 'finding-reason' }, `触发条件：${finding.condition || finding.title}`),
       ),
     ),
   ];

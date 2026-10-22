@@ -1251,3 +1251,30 @@ pre.code {
   border-left: 2px solid var(--border);
   padding-left: 8px;
 }
+
+/* 当前版本扫描判定结论 */
+.scan-verdict {
+  margin: 6px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  font-size: 13px;
+}
+
+.scan-verdict .verdict-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.scan-verdict .verdict-row {
+  margin: 3px 0;
+}
+
+.scan-verdict .verdict-cond {
+  margin: 2px 0 2px 14px;
+  color: var(--text-dim);
+}

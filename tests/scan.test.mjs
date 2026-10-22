@@ -249,5 +249,6 @@ test('每条扫描发现都带判定说明（为什么被判为此等级）', ()
   for (const finding of result.findings) {
     assert.match(finding.reason, /判定依据：/);
     assert.match(finding.reason, /强度判定（(高危|中危|低危)）/);
+    assert.ok(finding.condition && finding.condition !== finding.title, '应绑定具体触发条件');
   }
 });
