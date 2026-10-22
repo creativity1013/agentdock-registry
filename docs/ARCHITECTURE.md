@@ -91,6 +91,7 @@ data/
 ├── signing-key.json             # 平台 ed25519 签名私钥（600，务必备份）
 ├── BOOTSTRAP-TOKENS.txt         # 首次启动的明文令牌（600，可删）
 ├── audit.log                    # append-only JSONL 审计
+├── transparency.log             # 可验证透明日志（哈希链，append-only，审核通过时追加）
 └── packages/
     └── <kind>/<name>/<version>/
         ├── meta.json            # 版本元数据（状态、扫描、审核、文件清单、哈希）
@@ -162,6 +163,12 @@ data/
 
 动作命名：`package.publish`、`package.install`（meta.target 区分安装目标）、`review.approve`、`review.reject`、`user.create_token`。
 
+### 发布者签名（users.json keys[] + version.publisherSignature）
+
+- `POST /api/v1/me/keys` 或发布时携带 `publisherSignature.publicKey`（TOFU）注册 ed25519 公钥，`users.json` 的用户对象存 `keys: [{keyId, name, algorithm, publicKeyPem, createdAt}]`，`keyId = sha256(publicKeyPem).slice(0, 32)`。
+- 发布请求可选附带 `publisherSignature = {signature, publicKey?, keyId?, keyName?}`；服务端定位/注册公钥后，对 `publisherSignaturePayload({kind,name,version,contentHash})` 验签，失败返回 422。
+- 审核通过时透明日志记录 `publisherKeyId`，便于公开核对「哪个密钥提交了哪个版本」。
+
 ### 平台签名（signing-key.json + version.signature）
 
 - 首次需要签名时自动生成 ed25519 密钥对：私钥只落盘 `data/signing-key.json`（600），公钥由 `GET /api/v1/keys` 公开。
@@ -175,6 +182,12 @@ data/
   `contentHash = sha256(JSON.stringify(sorted [[path, sha256(file), encoding], ...]))`，由 `bundle.computeContentHash` 统一定义。
 - 验签分两步：① 重新读取 `packages/.../files/` 计算 `diskContentHash` 与发布记录比对（防存储篡改）；② 用平台公钥校验 ed25519 签名与载荷。`store.verifySignature`、`GET .../signature?verify=1`、CLI `verify-signature` 共用该逻辑。
 - 签名只覆盖已发布版本；被拒绝版本不签名，重新发布会生成新的 contentHash，旧签名不再对应。
+
+### 透明日志（transparency.log）
+
+- 每次审核通过（`decision=approve`）追加一条事件：`{seq, at, kind, name, version, contentHash, publisher, platformKeyId, publisherKeyId, review, prevHash, hash}`；`hash = sha256(JSON.stringify([context, seq, at, kind, name, version, contentHash, publisher, platformKeyId, publisherKeyId, review, prevHash]))`，`prevHash` 首条为 `GENESIS_HASH`。
+- `GET /api/v1/transparency/verify` 重算每条事件哈希与链关系，返回 `{ok,size,headHash,brokenAt,reasons}`；`GET .../proof?kind&name&version` 返回 `{entry,index,size,root,proof}`（Merkle 树叶子为事件 `hash`，叶/节点前缀 0x00/0x01）。
+- CLI `transparency verify` 验链、`transparency proof <kind/name[@version]>` 用 `verifyInclusionProof` 本地校验包含证明。
 
 ### meta.json 与 db.json 的关系
 
@@ -194,8 +207,9 @@ data/
 | `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature`） |
 | `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
-| `src/signing.mjs` | ed25519 内容签名/验签（平台密钥管理） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`keyIdFor` |
-| `src/auth.mjs` | 用户/令牌/角色 | `createUserDirectory`、`tokenFromRequest` |
+| `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
+| `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
+| `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf`）、`tokenFromRequest` |
 | `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
@@ -211,7 +225,9 @@ data/
 4. **审计**：所有写操作（发布、审核、安装、令牌创建）均记录，append-only JSONL。
 5. **扫描**：启发式规则，可配置阻断阈值；`overrideScan` 仅 admin、且事件写入审计。
 6. **网络**：默认仅监听 `127.0.0.1`；无内置 TLS，生产部署应置于反向代理后。
-7. **内容签名与完整性**：审核通过即用平台 ed25519 私钥签名（绑定 kind/name/version/contentHash）；公钥公开、可离线验签；验签时重算磁盘内容哈希，可发现发布后对 `packages/` 内容的替换。平台签名证明「曾经本平台审核、未被替换」，不等价于发布者身份——发布者密钥签名与透明日志列入 Roadmap。
+7. **内容签名与完整性**：审核通过即用平台 ed25519 私钥签名（绑定 kind/name/version/contentHash）；公钥公开、可离线验签；验签时重算磁盘内容哈希，可发现发布后对 `packages/` 内容的替换。
+8. **发布者签名（可选）**：发布者用自有 ed25519 私钥对 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥时 TOFU 注册到 `users.json` 的 `keys[]`（等价 `POST /me/keys`）。平台签名证明「审过且未被替换」，发布者签名证明「谁提交的」。
+9. **可验证透明日志**：审核通过时向 `transparency.log` 追加哈希链事件（contentHash、发布者、平台/发布者 keyId、审核人），事件哈希构造 RFC 6962 风格 Merkle 树；`/transparency/verify` 校验整链，`/transparency/proof` 返回包含证明，CLI 使用 `verifyInclusionProof` 本地校验。`audit.log` 面向运维（含 IP/角色），`transparency.log` 面向外部可复核（不含敏感字段）。
 
 ## 6. 安装目标模型
 
@@ -292,7 +308,7 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 ## 9. 测试策略
 
-- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化）。
+- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
 - **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。
@@ -307,4 +323,4 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 容器内配置全部走环境变量（`AGENTDOCK_HOST`、`AGENTDOCK_PORT`、`AGENTDOCK_DATA`、`AGENTDOCK_SCAN_BLOCK`、`AGENTDOCK_PUBLIC_URL`），与 CLI 的 `~/.agentdock/config.json` 互不依赖。生产部署应置于反向代理之后，由代理提供 TLS 与访问控制，并限制 `/api/v1/admin/*`。
 
-存储侧只需要备份 `/data`：`db.json`（热索引）、`users.json`（令牌哈希）、`audit.log`（append-only）、`packages/`（版本内容与 meta.json）。迁移时只要有 `packages/` 即可重建版本内容，`db.json` 可用 `meta.json` 人工重建（自动重建列入 roadmap）。
+存储侧只需要备份 `/data`：`db.json`（热索引）、`users.json`（令牌哈希与发布者公钥）、`audit.log`、`transparency.log`（append-only）、`packages/`（版本内容与 meta.json）。迁移时只要有 `packages/` 即可重建版本内容，`db.json` 可用 `meta.json` 人工重建（自动重建列入 roadmap）。

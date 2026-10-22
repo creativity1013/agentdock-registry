@@ -132,6 +132,45 @@ async function main() {
   assert(keys.includes('ed25519') && keys.includes('BEGIN PUBLIC KEY'), 'CLI keys 缺少公钥');
   console.log('✓ 内容签名：审核后自动签名，CLI 验签与公钥查询正常');
 
+  // 发布者签名 + 可验证透明日志
+  const keyDir = path.join(home, '.agentdock', 'keys');
+  const keygen = await runCli(['keygen', '--out', keyDir, '--name', 'smoke-publisher'], tokens.publisher);
+  assert(keygen.includes('已生成发布者密钥对'), `keygen 输出异常：${keygen}`);
+  const privateKeyFile = path.join(keyDir, 'smoke-publisher-private.pem');
+  const publicKeyFile = path.join(keyDir, 'smoke-publisher-public.pem');
+  assert(fs.existsSync(privateKeyFile) && fs.existsSync(publicKeyFile), 'keygen 未生成密钥文件');
+  assert((fs.statSync(privateKeyFile).mode & 0o777) === 0o600, '私钥文件权限不是 600');
+
+  await runCli(['register-key', '--key', publicKeyFile, '--name', 'smoke-publisher'], tokens.publisher);
+  const mineKeys = await runCli(['keys', '--mine'], tokens.publisher);
+  assert(mineKeys.includes('smoke-publisher'), 'CLI keys --mine 未显示已注册密钥');
+
+  await runCli(
+    [
+      'publish',
+      path.join(EXAMPLES, 'skill-code-reviewer'),
+      '--version',
+      '0.2.0',
+      '--key',
+      privateKeyFile,
+      '--key-name',
+      'smoke-publisher',
+    ],
+    tokens.publisher,
+  );
+  await runCli(['review', 'approve', 'skill/code-reviewer@0.2.0', '--note', 'signed smoke'], tokens.reviewer);
+
+  const transparencyEntries = await runCli(['transparency', 'entries', '--limit', '10'], tokens.reviewer);
+  assert(transparencyEntries.includes('skill/code-reviewer@0.2.0'), '透明日志缺少带发布者签名的版本');
+  const transparencyVerify = await runCli(['transparency', 'verify'], tokens.reviewer);
+  assert(transparencyVerify.includes('校验通过'), `透明日志链校验失败：${transparencyVerify}`);
+  const transparencyProof = await runCli(
+    ['transparency', 'proof', 'skill/code-reviewer@0.2.0'],
+    tokens.reviewer,
+  );
+  assert(transparencyProof.includes('本地校验：✓ 通过'), `透明日志包含证明校验失败：${transparencyProof}`);
+  console.log('✓ 发布者签名 + 透明日志：keygen / 注册 / 签名发布 / 链校验 / 包含证明均正常');
+
   // 冒烟结果
   const stats = await fetch(`${server.url}/api/v1/stats`).then((response) => response.json());
   console.log('');

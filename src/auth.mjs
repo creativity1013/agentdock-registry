@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { readJson, writeJsonAtomic, sha256, randomToken, nowIso, safeEqual } from './util.mjs';
 import { ensureDataLayout } from './config.mjs';
 import { unauthorized, forbidden, badRequest, notFound } from './errors.mjs';
+import { keyIdFor, isValidEd25519PublicKey } from './signing.mjs';
 
 export const ROLES = ['viewer', 'publisher', 'reviewer', 'admin'];
 export const ROLE_RANK = { viewer: 0, publisher: 1, reviewer: 2, admin: 3 };
@@ -50,7 +51,7 @@ export function createUserDirectory(config) {
     fs.writeFileSync(bootstrapFile, lines.join('\n'), { mode: 0o600 });
     bootstrap = plaintext;
   } else {
-    state.users = state.users.map((user) => ({ role: 'viewer', ...user }));
+    state.users = state.users.map((user) => ({ role: 'viewer', ...user, keys: Array.isArray(user.keys) ? user.keys : [] }));
   }
 
   function authenticate(token) {
@@ -87,6 +88,71 @@ export function createUserDirectory(config) {
     return { user: { id: user.id, name: user.name, role: user.role, createdAt: user.createdAt }, token };
   }
 
+  /* ------------------------------ 发布者签名密钥 ------------------------------ */
+
+  const getUser = (userId) => state.users.find((user) => user.id === userId) || null;
+
+  function publicKeyInfo(key) {
+    return {
+      keyId: key.keyId,
+      name: key.name,
+      algorithm: key.algorithm || 'ed25519',
+      createdAt: key.createdAt,
+      publicKey: key.publicKeyPem,
+    };
+  }
+
+  function listKeys(userId) {
+    const user = getUser(userId);
+    return (user?.keys || []).map(publicKeyInfo);
+  }
+
+  /** 注册发布者公钥（TOFU：首次发布时由 CLI 自动提交公钥） */
+  function registerKey(userId, { name, publicKeyPem } = {}) {
+    const user = getUser(userId);
+    if (!user) throw unauthorized('用户不存在');
+    if (!user.keys) user.keys = [];
+    if (typeof name !== 'string' || name.trim() === '') throw badRequest('密钥名称不能为空');
+    const pem = typeof publicKeyPem === 'string' ? publicKeyPem.trim() : '';
+    if (!isValidEd25519PublicKey(pem)) throw badRequest('publicKeyPem 必须是 ed25519 公钥 PEM');
+    const keyId = keyIdFor(pem);
+    const existing = user.keys.find((key) => key.keyId === keyId);
+    if (existing) return publicKeyInfo(existing);
+    if (user.keys.some((key) => key.name === name.trim())) {
+      throw badRequest(`密钥名称已存在：${name.trim()}`);
+    }
+    const key = {
+      keyId,
+      name: name.trim(),
+      algorithm: 'ed25519',
+      publicKeyPem: pem,
+      createdAt: nowIso(),
+    };
+    user.keys.push(key);
+    writeJsonAtomic(usersFile, state);
+    return publicKeyInfo(key);
+  }
+
+  function removeKey(userId, keyId) {
+    const user = getUser(userId);
+    if (!user || !Array.isArray(user.keys)) throw notFound('密钥不存在');
+    const index = user.keys.findIndex((key) => key.keyId === keyId);
+    if (index === -1) throw notFound('密钥不存在');
+    user.keys.splice(index, 1);
+    writeJsonAtomic(usersFile, state);
+    return true;
+  }
+
+  function findKey(userId, keyId) {
+    const user = getUser(userId);
+    return (user?.keys || []).find((key) => key.keyId === keyId) || null;
+  }
+
+  function keysOf(userId) {
+    const user = getUser(userId);
+    return user?.keys || [];
+  }
+
   function requireRole(user, role) {
     if (!user) throw unauthorized();
     if ((ROLE_RANK[user.role] ?? -1) < (ROLE_RANK[role] ?? 99)) throw forbidden();
@@ -100,6 +166,11 @@ export function createUserDirectory(config) {
     authenticate,
     list,
     createToken,
+    listKeys,
+    registerKey,
+    removeKey,
+    findKey,
+    keysOf,
     requireRole,
     get count() {
       return state.users.length;

@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { startTestServer, skillPayload } from './helpers.mjs';
+import { normalizeBundle } from '../src/bundle.mjs';
+import { publisherSignaturePayload, publicKeyPemFromPrivate } from '../src/signing.mjs';
+import { verifyInclusionProof } from '../src/transparency.mjs';
 
 const approveAll = async (request, reviewer) => {
   const queue = await request('GET', '/review/queue', { token: reviewer });
@@ -490,4 +494,144 @@ test('内容签名：审核通过自动签名、公钥公开、篡改存储内�
   fs.writeFileSync(filePath, original);
   const restored = await request('GET', '/packages/skill/demo-skill/versions/0.1.0/signature?verify=1');
   assert.equal(restored.data.valid, true, JSON.stringify(restored.data.reasons));
+});
+
+test('发布者签名 + 透明日志：TOFU 注册、验签、包含证明与链校验', async (t) => {
+  const server = await startTestServer();
+  t.after(() => server.close());
+  const { request, tokens, app } = server;
+  const publisher = tokens.publisher;
+  const reviewer = tokens.reviewer;
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+
+  function signedPayload(version, { badSignature = false } = {}) {
+    const payload = skillPayload({ version });
+    const normalized = normalizeBundle(payload);
+    const contentHash = normalized.bundle.contentHash;
+    const text = publisherSignaturePayload({
+      kind: 'skill',
+      name: 'demo-skill',
+      version,
+      contentHash,
+    });
+    const signature = crypto
+      .sign(null, Buffer.from(text, 'utf8'), crypto.createPrivateKey(privatePem))
+      .toString('base64');
+    return {
+      ...payload,
+      publisherSignature: {
+        signature: badSignature ? Buffer.from(`bad-${signature}`).toString('base64') : signature,
+        publicKey: publicPem,
+        keyName: 'alice-laptop',
+      },
+    };
+  }
+
+  // 签名错误 → 422，且不落库
+  const bad = await request('POST', '/packages', { token: publisher, body: signedPayload('9.9.9', { badSignature: true }) });
+  assert.equal(bad.status, 422, JSON.stringify(bad.data));
+  assert.match(JSON.stringify(bad.data), /签名/);
+
+  // 正确签名发布 → pending，TOFU 自动注册公钥
+  const signed = await request('POST', '/packages', { token: publisher, body: signedPayload('0.2.0') });
+  assert.equal(signed.status, 201, JSON.stringify(signed.data));
+  assert.equal(signed.data.version.status, 'pending');
+  assert.equal(signed.data.version.publisherSignature.algorithm, 'ed25519');
+  assert.match(signed.data.version.publisherSignature.keyId, /^[0-9a-f]{32}$/);
+
+  const mine = await request('GET', '/me/keys', { token: publisher });
+  assert.equal(mine.status, 200);
+  assert.equal(mine.data.keys.length, 1);
+  assert.equal(mine.data.keys[0].keyId, signed.data.version.publisherSignature.keyId);
+  assert.equal(mine.data.keys[0].name, 'alice-laptop');
+
+  // 匿名读取我的密钥 → 401
+  const anonymousKeys = await request('GET', '/me/keys');
+  assert.equal(anonymousKeys.status, 401);
+
+  // 非法公钥注册 → 400
+  const invalidKey = await request('POST', '/me/keys', {
+    token: publisher,
+    body: { name: 'broken', publicKeyPem: 'not-a-pem' },
+  });
+  assert.equal(invalidKey.status, 400);
+
+  // 未签名也能发布（可选签名）
+  const unsigned = await request('POST', '/packages', { token: publisher, body: skillPayload({ version: '0.3.0' }) });
+  assert.equal(unsigned.status, 201, JSON.stringify(unsigned.data));
+  assert.equal(unsigned.data.version.publisherSignature, null);
+
+  // 审核通过：平台签名 + 透明日志
+  for (const version of ['0.2.0', '0.3.0']) {
+    const result = await request('POST', '/review', {
+      token: reviewer,
+      body: { kind: 'skill', name: 'demo-skill', version, decision: 'approve', note: 'LGTM' },
+    });
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+  }
+
+  const head = await request('GET', '/transparency/head');
+  assert.equal(head.status, 200);
+  assert.equal(head.data.size, 2);
+  assert.match(head.data.headHash, /^[0-9a-f]{64}$/);
+  assert.match(head.data.merkleRoot, /^[0-9a-f]{64}$/);
+
+  const entries = await request('GET', '/transparency/entries');
+  assert.equal(entries.status, 200);
+  assert.equal(entries.data.total, 2);
+  assert.equal(entries.data.items[0].version, '0.3.0');
+  assert.equal(entries.data.items[1].version, '0.2.0');
+  assert.ok(entries.data.items[1].publisherKeyId, '有发布者签名的版本应记录 publisherKeyId');
+  assert.equal(entries.data.items[0].publisherKeyId, '');
+
+  // 包含证明在本地可验证
+  for (const version of ['0.2.0', '0.3.0']) {
+    const proof = await request(
+      'GET',
+      `/transparency/proof?kind=skill&name=demo-skill&version=${version}`,
+    );
+    assert.equal(proof.status, 200, JSON.stringify(proof.data));
+    assert.equal(
+      verifyInclusionProof({
+        leafHash: proof.data.entry.hash,
+        index: proof.data.index,
+        size: proof.data.size,
+        proof: proof.data.proof,
+        root: proof.data.root,
+      }),
+      true,
+    );
+  }
+
+  // 链校验通过；被拒绝的版本不写日志
+  const verify = await request('GET', '/transparency/verify');
+  assert.equal(verify.status, 200);
+  assert.equal(verify.data.ok, true);
+  const rejected = await request('POST', '/packages', { token: publisher, body: skillPayload({ version: '0.4.0' }) });
+  assert.equal(rejected.status, 201);
+  await request('POST', '/review', {
+    token: reviewer,
+    body: { kind: 'skill', name: 'demo-skill', version: '0.4.0', decision: 'reject', note: 'no' },
+  });
+  const headAfterReject = await request('GET', '/transparency/head');
+  assert.equal(headAfterReject.data.size, 2);
+
+  // 透明日志落盘
+  assert.ok(fs.existsSync(app.config.files.transparency));
+  const proof = await request('GET', '/transparency/proof?kind=skill&name=demo-skill&version=0.4.0', { token: reviewer });
+  assert.equal(proof.status, 404);
+
+  // 应用层校验密钥注册（直接调用 users 目录）
+  const pem = publicKeyPemFromPrivate(privatePem);
+  assert.equal(pem.trim(), publicPem.trim());
+  const users = app.users;
+  const user = users.list().find((item) => item.name === 'publisher');
+  const keys = users.listKeys(user.id);
+  assert.equal(keys.length, 1);
+  assert.equal(users.findKey(user.id, keys[0].keyId).keyId, keys[0].keyId);
+  assert.equal(users.removeKey(user.id, keys[0].keyId), true);
+  assert.equal(users.listKeys(user.id).length, 0);
 });

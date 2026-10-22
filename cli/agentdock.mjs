@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -14,6 +15,8 @@ import {
   writePresetFragment,
 } from '../src/dsh-preset.mjs';
 import { resolveHome, CLI_CONFIG_FILE } from '../src/config.mjs';
+import { publisherSignaturePayload, publicKeyPemFromPrivate } from '../src/signing.mjs';
+import { verifyInclusionProof } from '../src/transparency.mjs';
 import { formatBytes } from '../src/util.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,6 +30,7 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock whoami                                 查看当前用户
 
   agentdock publish <目录> [--type skill|agent|plugin] [--version 0.1.0] [--name <name>] [--dry-run]
+                    [--key <私钥 PEM>] [--key-name <名字>]  附加发布者内容签名（TOFU 自动注册公钥）
   agentdock verify <目录>                          本地校验 + 安全扫描，不提交
   agentdock import-claude [--dir ~/.claude/agents] [--publish] [--presets] [--presets-dir <目录>] [--profile <profile>]
                                                    导入 Claude Code agent；可同时生成 DSH agent-preset 片段
@@ -37,7 +41,14 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
 
   agentdock verify-signature <kind>/<name>[@version]
                                                    验证平台内容签名（ed25519，重算磁盘内容哈希）
-  agentdock keys                                   查看平台签名公钥（可离线验签）
+  agentdock keys [--mine]                          查看平台签名公钥 / 我的发布者公钥（--mine）
+  agentdock keygen [--out <目录>] [--name <名字>] [--force]
+                                                   生成发布者 ed25519 密钥对（私钥 600，公钥可公开）
+  agentdock register-key --key <公钥 PEM 文件> [--name <名字>]
+                                                   把公钥注册到当前账号（publish --key 也会自动 TOFU 注册）
+
+  agentdock transparency [head|verify|entries|proof <kind>/<name>[@version]]
+                                                   可验证透明日志：查看头部 / 验链 / 列表 / 版本包含证明
 
   agentdock review list                            审核队列（需 reviewer 角色）
   agentdock review approve <kind>/<name>@<version> [--note "..."]
@@ -352,6 +363,17 @@ async function cmdPublish(positionals, flags) {
   }
   const conn = resolveConnection(flags);
   requireToken(conn);
+  if (flags.key) {
+    payload.publisherSignature = buildPublisherSignature({
+      keyFile: String(flags.key),
+      keyName: flags['key-name'] ? String(flags['key-name']) : '',
+      kind: meta.kind,
+      name: meta.name,
+      version: meta.version,
+      contentHash: report.bundle.contentHash,
+    });
+    console.log(`▸ 已附加发布者签名（${payload.publisherSignature.keyName}）`);
+  }
   const result = await api(conn, 'POST', '/api/v1/packages', {
     ...payload,
     overrideScan: Boolean(flags['override-scan']),
@@ -457,8 +479,155 @@ async function cmdInstall(positionals, flags) {
   }
 }
 
+/** 读取发布者私钥并生成 detached 签名（publish --key 用） */
+function buildPublisherSignature({ keyFile, keyName, kind, name, version, contentHash }) {
+  if (!contentHash) throw new Error('缺少 contentHash，无法签名（请先重新校验）');
+  const privatePem = fs.readFileSync(keyFile, 'utf8');
+  const payload = publisherSignaturePayload({ kind, name, version, contentHash });
+  let signature;
+  try {
+    signature = crypto.sign(null, Buffer.from(payload, 'utf8'), crypto.createPrivateKey(privatePem)).toString('base64');
+  } catch (error) {
+    throw new Error(`私钥无法使用：${error.message}`);
+  }
+  return {
+    signature,
+    publicKey: publicKeyPemFromPrivate(privatePem),
+    keyName: keyName || path.basename(keyFile).replace(/\.pem$/i, '') || 'publisher',
+  };
+}
+
+async function cmdKeygen(flags) {
+  if (typeof crypto.generateKeyPairSync !== 'function') throw new Error('当前 Node 不支持 ed25519 密钥生成');
+  const outDir = path.resolve(flags.out ? String(flags.out) : process.cwd());
+  const name = flags.name ? String(flags.name) : 'publisher';
+  if (!/^[a-zA-Z0-9._-]+$/.test(name)) throw new Error('--name 只能包含字母、数字、点、下划线和短横线');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const privateFile = path.join(outDir, `${name}-private.pem`);
+  const publicFile = path.join(outDir, `${name}-public.pem`);
+  if (fs.existsSync(privateFile) && !flags.force) {
+    throw new Error(`私钥文件已存在：${privateFile}（加 --force 可覆盖）`);
+  }
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(privateFile, privatePem, { mode: 0o600 });
+  fs.writeFileSync(publicFile, publicPem, { mode: 0o644 });
+  console.log(`✓ 已生成发布者密钥对`);
+  console.log(`  私钥（勿泄露）：${privateFile}`);
+  console.log(`  公钥（可公开）：${publicFile}`);
+  console.log('');
+  console.log('下一步：');
+  console.log(`  node cli/agentdock.mjs register-key --key ${publicFile} --name ${name}`);
+  console.log(`  node cli/agentdock.mjs publish <目录> --key ${privateFile} --key-name ${name}`);
+}
+
+async function cmdRegisterKey(flags) {
+  const conn = resolveConnection(flags);
+  requireToken(conn);
+  const file = flags.key ? String(flags.key) : '';
+  const keyPath = file && fs.existsSync(file) ? file : file;
+  let publicKeyPem;
+  if (keyPath) {
+    publicKeyPem = fs.readFileSync(keyPath, 'utf8');
+  } else {
+    throw new Error('需要 --key <公钥 PEM 文件>');
+  }
+  const name = flags.name ? String(flags.name) : path.basename(keyPath).replace(/\.pem$/i, '');
+  const data = await api(conn, 'POST', '/api/v1/me/keys', { name, publicKeyPem });
+  if (flags.json) return console.log(JSON.stringify(data, null, 2));
+  console.log(`✓ 已注册密钥 ${data.key.name}（keyId ${data.key.keyId}）`);
+  console.log('  下次发布：agentdock publish <目录> --key <私钥 PEM>');
+}
+
+async function cmdTransparency(positionals, flags) {
+  const conn = resolveConnection(flags);
+  const sub = positionals[0] || 'head';
+  if (sub === 'head' || sub === 'entries') {
+    if (sub === 'entries') {
+      const limit = flags.limit ? String(flags.limit) : '20';
+      const data = await api(conn, 'GET', `/api/v1/transparency/entries?limit=${encodeURIComponent(limit)}`);
+      if (flags.json) return console.log(JSON.stringify(data, null, 2));
+      console.log(`透明日志：${data.head.size} 条事件，Merkle 根 ${data.head.merkleRoot || '（空）'}`);
+      for (const entry of data.items) {
+        console.log(`  #${entry.seq} ${entry.at}  ${entry.kind}/${entry.name}@${entry.version}`);
+        console.log(`     contentHash ${entry.contentHash.slice(0, 16)}…  平台签名 ${entry.platformKeyId || '无'}  发布者签名 ${entry.publisherKeyId || '无'}`);
+      }
+      return;
+    }
+    const head = await api(conn, 'GET', '/api/v1/transparency/head');
+    if (flags.json) return console.log(JSON.stringify(head, null, 2));
+    console.log(`透明日志头部：`);
+    console.log(`  事件数：${head.size}`);
+    console.log(`  头部哈希：${head.headHash}`);
+    console.log(`  Merkle 根：${head.merkleRoot || '（空）'}`);
+    console.log(`  最后事件：${head.lastEventAt || '-'}`);
+    return;
+  }
+  if (sub === 'verify') {
+    const data = await api(conn, 'GET', '/api/v1/transparency/verify');
+    if (flags.json) {
+      console.log(JSON.stringify(data, null, 2));
+      if (!data.ok) process.exitCode = 1;
+      return;
+    }
+    if (data.ok) {
+      console.log(`✓ 透明日志校验通过（${data.size} 条事件，头部 ${data.headHash.slice(0, 16)}…）`);
+    } else {
+      console.error(`✗ 透明日志校验失败：${data.reasons.join('；')}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (sub === 'proof') {
+    const spec = parseSpec(positionals[1]);
+    const conn2 = conn;
+    let version = spec.version;
+    if (!version) {
+      const detail = await api(conn2, 'GET', `/api/v1/packages/${spec.kind}/${spec.name}`);
+      if (!detail.latestVersion) throw new Error('该包还没有已发布版本');
+      version = detail.latestVersion;
+    }
+    const query = new URLSearchParams({ kind: spec.kind, name: spec.name, version });
+    const data = await api(conn2, 'GET', `/api/v1/transparency/proof?${query.toString()}`);
+    const checked = verifyInclusionProof({
+      leafHash: data.entry.hash,
+      index: data.index,
+      size: data.size,
+      proof: data.proof,
+      root: data.root,
+    });
+    if (flags.json) {
+      console.log(JSON.stringify({ ...data, localVerified: checked }, null, 2));
+      if (!checked) process.exitCode = 1;
+      return;
+    }
+    console.log(`▸ ${spec.kind}/${spec.name}@${version} 透明日志包含证明`);
+    console.log(`  事件序号：#${data.entry.seq}（index ${data.index} / size ${data.size}）`);
+    console.log(`  事件哈希：${data.entry.hash}`);
+    console.log(`  Merkle 根：${data.root}`);
+    console.log(`  本地校验：${checked ? '✓ 通过' : '✗ 失败'}`);
+    if (!checked) process.exitCode = 1;
+    return;
+  }
+  throw new Error(`未知子命令：transparency ${sub}（支持 head / verify / entries / proof）`);
+}
+
 async function cmdKeys(flags) {
   const conn = resolveConnection(flags);
+  if (flags.mine) {
+    requireToken(conn);
+    const mine = await api(conn, 'GET', '/api/v1/me/keys');
+    if (flags.json) return console.log(JSON.stringify(mine, null, 2));
+    if (mine.keys.length === 0) {
+      console.log('当前账号还没有发布者密钥。生成：agentdock keygen --out ~/.agentdock/keys');
+      return;
+    }
+    for (const key of mine.keys) {
+      console.log(`${key.name}  keyId=${key.keyId}  ${key.algorithm}  创建于 ${new Date(key.createdAt).toLocaleString('zh-CN', { hour12: false })}`);
+    }
+    return;
+  }
   const data = await api(conn, 'GET', '/api/v1/keys');
   if (flags.json) return console.log(JSON.stringify(data, null, 2));
   for (const key of data.keys) {
@@ -709,6 +878,12 @@ async function main() {
       return cmdKeys(flags);
     case 'verify-signature':
       return cmdVerifySignature(positionals, flags);
+    case 'keygen':
+      return cmdKeygen(flags);
+    case 'register-key':
+      return cmdRegisterKey(flags);
+    case 'transparency':
+      return cmdTransparency(positionals, flags);
     case 'tokens':
       return cmdTokens(positionals, flags);
     case 'import-claude':

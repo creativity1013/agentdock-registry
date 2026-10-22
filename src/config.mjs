@@ -41,6 +41,7 @@ export function loadConfig(env = process.env, overrides = {}) {
       audit: path.join(dataDir, 'audit.log'),
       packages: path.join(dataDir, 'packages'),
       signingKey: path.join(dataDir, 'signing-key.json'),
+      transparency: path.join(dataDir, 'transparency.log'),
     },
   };
   return config;

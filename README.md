@@ -89,6 +89,13 @@ agentdock import-claude
 agentdock import-claude --publish
 agentdock import-claude --presets                 # 同时生成 DSH agent-preset 片段
 agentdock import-claude --presets --profile web   # 生成并自动并入 web profile
+
+# 发布者签名 + 透明日志
+agentdock keygen --out ~/.agentdock/keys --name alice   # 生成 ed25519 密钥对（私钥 600）
+agentdock register-key --key ~/.agentdock/keys/alice-public.pem --name alice
+agentdock publish ./my-skill --key ~/.agentdock/keys/alice-private.pem --key-name alice
+agentdock transparency verify                           # 校验透明日志哈希链
+agentdock transparency proof skill/my-skill@0.1.0       # 版本包含证明（本地校验 Merkle）
 ```
 
 | 命令 | 说明 |
@@ -96,14 +103,17 @@ agentdock import-claude --presets --profile web   # 生成并自动并入 web pr
 | `serve` | 启动 HTTP 服务 + Web 市场（`--port --host --data --home --scan-block`） |
 | `login` / `whoami` | 保存/查看当前服务端与令牌（`~/.agentdock/config.json`） |
 | `verify <dir>` | 本地校验能力包目录，输出错误、警告与扫描结果 |
-| `publish <dir>` | 提交能力包，默认版本 `0.1.0`（`--version --tags`） |
+| `publish <dir>` | 提交能力包，默认版本 `0.1.0`（`--version --tags`）；`--key <私钥 PEM>` 附加发布者签名（TOFU 自动注册公钥） |
 | `list` | 列出已发布能力包（`--kind --json`） |
 | `review queue` | 列出待审核版本 |
 | `review approve\|reject <kind/name@version>` | 审核操作（`--note`） |
 | `install <kind/name[@version]>` | 安装到目标（`--target --dir --force --profile`）；`--target dsh-agent` 生成 DSH preset 片段 |
 | `audit` | 查看审计日志（`--limit --action --json`） |
 | `verify-signature <kind/name[@version]>` | 验证内容签名（ed25519）；同时重算磁盘内容哈希发现篡改（`--json`） |
-| `keys` | 导出平台签名公钥（可用于离线验签） |
+| `keys [--mine]` | 导出平台签名公钥（可离线验签）；`--mine` 查看自己的发布者公钥 |
+| `keygen` | 生成发布者 ed25519 密钥对（`--out --name --force`；私钥 600、公钥可公开） |
+| `register-key` | 注册发布者公钥（`--key <公钥 PEM> --name`） |
+| `transparency [head\|verify\|entries\|proof <kind/name[@version]>]` | 可验证透明日志：头部 / 验链 / 列表 / 版本 Merkle 包含证明（本地校验） |
 | `tokens create\|list` | 令牌管理（需 admin） |
 | `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
 
@@ -241,6 +251,9 @@ my-plugin/
 | GET | `/keys` | 公开 | 平台签名公钥（ed25519，`keyId` + PEM）及各版本签名可离线验证 |
 | GET | `/stats` | 公开 | 市场统计 |
 | GET | `/me` | 登录 | 当前令牌身份 |
+| GET | `/me/keys` | 登录 | 当前账号的发布者公钥 |
+| POST | `/me/keys` | publisher | 注册发布者公钥 `{name,publicKeyPem}`（ed25519 PEM） |
+| DELETE | `/me/keys/:keyId` | 登录 | 删除发布者公钥 |
 | GET | `/targets` | 公开 | 可用安装目标 |
 | POST | `/verify` | publisher | 校验/扫描能力包，不入库 |
 | GET | `/packages?q=&kind=&status=&page=&pageSize=` | 公开（pending 需审核权限） | 市场列表（分页，`pageSize` 默认 24、最大 100） |
@@ -255,6 +268,10 @@ my-plugin/
 | POST | `/install` | publisher | 安装到目标目录（服务端权限内） |
 | GET | `/review/queue` | reviewer | 待审核队列 |
 | POST | `/review` | reviewer | 审核 `{kind,name,version,decision,note}` |
+| GET | `/transparency/head` | 公开 | 透明日志头部：事件数、headHash、Merkle 根 |
+| GET | `/transparency/entries?limit=&offset=` | 公开 | 透明日志事件（最新在前） |
+| GET | `/transparency/verify` | 公开 | 校验整条哈希链（篡改返回 409） |
+| GET | `/transparency/proof?kind=&name=&version=` | 公开（pending 需审核权限） | 版本在 Merkle 树中的包含证明 |
 | GET | `/audit` | reviewer | 审计日志（`limit/offset/action`） |
 | GET | `/admin/users` | admin | 用户列表 |
 | POST | `/admin/tokens` | admin | 创建令牌 `{name,role}` |
@@ -357,7 +374,8 @@ agentdock/
 │   ├── targets.mjs          # 安装目标解析与落盘计划
 │   ├── diff.mjs             # 行级/文件级 diff（LCS + 规模上限降级）
 │   ├── dsh-preset.mjs       # agent 包 → DSH agent-preset 片段（tools 映射、profile 合并）
-│   ├── signing.mjs          # ed25519 内容签名/验签（审核通过即签名，公钥公开）
+│   ├── signing.mjs          # ed25519 内容签名/验签（审核通过即签名，公钥公开）+ 发布者签名
+│   ├── transparency.mjs     # 可验证透明日志（哈希链 + Merkle 树 + 包含证明）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
 │   ├── config.mjs           # 配置与数据目录
@@ -368,7 +386,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（60 个用例）
+├── tests/                   # node:test 测试（65 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -396,7 +414,9 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 服务默认只监听 `127.0.0.1`；面向团队部署时应置于反向代理/TLS 之后，并限制 `/api/v1/admin/*` 入口。
 - 扫描是**启发式规则**，不是沙箱：绕过规则注入的能力包仍可能危险，审核环节不可省。
 - **内容签名**：版本审核通过时，平台用 ed25519 私钥对规范化载荷 `agentdock-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名；私钥存于 `data/signing-key.json`（600 权限，务必备份），公钥通过 `GET /api/v1/keys` 公开，任何人可离线验签。`verify-signature` / `?verify=1` 会同时重算磁盘内容哈希，能发现发布后对存储内容的替换或篡改。
-- 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源；发布者密钥签名与可验证透明日志列入 Roadmap。
+- 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源。
+- **发布者签名（可选）**：`publish --key` 用发布者自己持有的 ed25519 私钥对载荷 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥发布时自动 TOFU 注册（等价于 `POST /api/v1/me/keys`）。签名覆盖内容哈希，因此可证明「该版本由持有对应私钥的人提交」。
+- **可验证透明日志**：每个版本审核通过时向 `data/transparency.log` 追加一条哈希链事件（contentHash、发布者、平台 keyId、发布者 keyId、审核人），事件哈希按 RFC 6962 风格构造 Merkle 树；任何人可通过 `GET /api/v1/transparency/verify` 校验整条链、通过 `GET .../proof` 获取某个版本的包含证明，并用 CLI `transparency verify|proof` 本地校验。日志 append-only，与平台签名交叉印证上架历史。
 - 市场已支持分页与服务端搜索；当前无 SSO/多租户。
 - diff 视图只做行级对比：二进制文件仅标记变化，超大文件（>512KB 或 >2000 行）退化为整文件标记。
 
@@ -405,7 +425,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [x] 市场分页、服务端搜索与类型筛选
 - [x] markdown 安全渲染与审核 diff 视图
 - [x] 内容签名（ed25519）与 `verify-signature` 验签接口
-- [ ] 发布者密钥签名 / 可验证透明日志（透明日志记录所有上架事件）
+- [x] 发布者密钥签名 / 可验证透明日志（透明日志记录所有上架事件）
 - [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
 - [ ] 与外部 registry（GitHub / skills.sh / MCP registry）双向同步
 - [ ] 依赖清单与 SBOM、按策略自动审批

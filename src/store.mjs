@@ -14,7 +14,14 @@ import { describeBundle } from './validate.mjs';
 import { analyzeInput } from './pipeline.mjs';
 import { ensureDataLayout } from './config.mjs';
 import { badRequest, conflict, notFound, unprocessable } from './errors.mjs';
-import { loadOrCreateSigningKey, signVersion, verifyVersionSignature } from './signing.mjs';
+import {
+  loadOrCreateSigningKey,
+  signVersion,
+  verifyVersionSignature,
+  publisherSignaturePayload,
+  verifyDetachedSignature,
+  keyIdFor,
+} from './signing.mjs';
 
 export const VERSION_STATUSES = ['pending', 'published', 'rejected'];
 export const VERSION_STATUS_LABEL = { pending: '待审核', published: '已发布', rejected: '已拒绝' };
@@ -25,7 +32,7 @@ const MAX_REVIEW_NOTE = 2000;
  * 元数据 + 包文件存储。db.json 只放元数据，能力包内容落盘到 data/packages/<kind>/<name>/<version>/files。
  * 所有版本内容不可变；唯一例外是被拒绝的版本允许重新提交覆盖。
  */
-export function createStore(config, { audit } = {}) {
+export function createStore(config, { audit, users, transparency } = {}) {
   ensureDataLayout(config);
   const dbFile = config.files.db;
   const packagesDir = config.files.packages;
@@ -74,8 +81,60 @@ export function createStore(config, { audit } = {}) {
     return analyzeInput(input, { scanBlock: config.scanBlock });
   }
 
+  /**
+   * 发布者内容签名（可选）：带 publisherSignature 时校验，并支持 TOFU 注册公钥。
+   * 返回写入 versionDoc.publisherSignature 的记录；未附带签名时返回 null。
+   */
+  function verifyPublisherSignature({ input, bundle, actorId, actor }) {
+    const attachment = input?.publisherSignature;
+    if (!attachment || typeof attachment !== 'object') return null;
+    if (!users) throw unprocessable('服务端未启用发布者密钥管理');
+    const signature = typeof attachment.signature === 'string' ? attachment.signature.trim() : '';
+    if (!signature) throw unprocessable('publisherSignature.signature 缺失');
+    const keys = actorId ? users.keysOf(actorId) : [];
+    let key = null;
+    if (typeof attachment.keyId === 'string' && attachment.keyId) {
+      key = keys.find((item) => item.keyId === attachment.keyId) || null;
+    }
+    if (!key && typeof attachment.publicKey === 'string' && attachment.publicKey.trim()) {
+      const publicKeyPem = attachment.publicKey.trim();
+      const keyId = keyIdFor(publicKeyPem);
+      key = keys.find((item) => item.keyId === keyId) || null;
+      if (!key) {
+        const info = users.registerKey(actorId, {
+          name: attachment.keyName || `${actor}-key`,
+          publicKeyPem,
+        });
+        key = { keyId: info.keyId, name: info.name, publicKeyPem: info.publicKey };
+      }
+    }
+    if (!key) {
+      throw unprocessable(
+        '未找到发布者公钥：请先调用 POST /api/v1/me/keys 注册密钥，或在 publisherSignature 中附带 publicKey',
+      );
+    }
+    const payload = publisherSignaturePayload({
+      kind: bundle.kind,
+      name: bundle.name,
+      version: bundle.version,
+      contentHash: bundle.contentHash,
+    });
+    const result = verifyDetachedSignature({ payload, signature, publicKeyPem: key.publicKeyPem });
+    if (!result.valid) {
+      throw unprocessable('发布者签名校验失败', { reasons: result.reasons });
+    }
+    return {
+      algorithm: 'ed25519',
+      keyId: key.keyId,
+      keyName: key.name,
+      payload,
+      signature,
+      signedAt: nowIso(),
+    };
+  }
+
   /** 发布：校验 + 扫描通过后进入待审核队列 */
-  function publish(input, { actor = 'unknown', role = '', ip = '' } = {}) {
+  function publish(input, { actor = 'unknown', actorId = '', role = '', ip = '' } = {}) {
     const report = analyze(input);
     if (!report.valid) {
       throw unprocessable('能力包校验未通过', { errors: report.errors, warnings: report.warnings });
@@ -97,6 +156,8 @@ export function createStore(config, { audit } = {}) {
       fs.rmSync(versionDir(bundle.kind, bundle.name, bundle.version), { recursive: true, force: true });
       delete pkg.versions[bundle.version];
     }
+
+    const publisherSignature = verifyPublisherSignature({ input, bundle, actorId, actor });
 
     const dir = filesDir(bundle.kind, bundle.name, bundle.version);
     ensureDir(dir);
@@ -120,6 +181,7 @@ export function createStore(config, { audit } = {}) {
       scan: report.scan,
       submittedAt,
       submittedBy: actor,
+      publisherSignature,
       review: null,
       installs: 0,
       overrideScan: Boolean(report.blocked),
@@ -199,6 +261,18 @@ export function createStore(config, { audit } = {}) {
       meta: { note: note.trim().slice(0, 200), ...(signature ? { keyId: signature.keyId } : {}) },
       ip,
     });
+    if (decision === 'approve') {
+      transparency?.append({
+        kind,
+        name,
+        version: versionDoc.version,
+        contentHash: versionDoc.contentHash,
+        publisher: versionDoc.submittedBy || '',
+        platformKeyId: versionDoc.signature?.keyId || '',
+        publisherKeyId: versionDoc.publisherSignature?.keyId || '',
+        review: { decision: 'approve', reviewer: actor, auto: Boolean(versionDoc.review?.auto) },
+      });
+    }
     return versionDoc;
   }
 

@@ -628,6 +628,19 @@ async function verifySignature(pkg, version) {
   }
 }
 
+async function showProof(pkg, version) {
+  try {
+    const query = new URLSearchParams({ kind: pkg.kind, name: pkg.name, version });
+    const data = await api(`/transparency/proof?${query.toString()}`);
+    toast(
+      `透明日志包含证明：#${data.entry.seq}（index ${data.index} / size ${data.size}），Merkle 根 ${data.root.slice(0, 16)}… 可用 CLI 离线校验`,
+      'ok',
+    );
+  } catch (error) {
+    toast(`获取包含证明失败：${error.message}`, 'error');
+  }
+}
+
 function paintDetail() {
   const body = $('#modal-body');
   const { pkg } = state.detail;
@@ -676,6 +689,24 @@ function paintDetail() {
               type: 'button',
               onClick: () => verifySignature(pkg, selected.version),
             }, '验签'),
+          )
+        : null,
+      selected?.publisherSignature ? h('span', { class: 'k' }, '发布者签名') : null,
+      selected?.publisherSignature
+        ? h(
+            'span',
+            { class: 'v' },
+            h(
+              'span',
+              { class: 'mono' },
+              `ed25519 · ${selected.publisherSignature.keyId.slice(0, 16)}…` +
+                (selected.publisherSignature.keyName ? ` · ${selected.publisherSignature.keyName}` : ''),
+            ),
+            h('button', {
+              class: 'btn btn-ghost btn-sm',
+              type: 'button',
+              onClick: () => showProof(pkg, selected.version),
+            }, '透明证明'),
           )
         : null,
     ),

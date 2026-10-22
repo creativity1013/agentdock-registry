@@ -130,3 +130,50 @@ export function verifyVersionSignature({ kind, name, version, contentHash, signa
     signedAt: signature.signedAt,
   };
 }
+
+/* ------------------------------ 发布者签名（内容签名之外的独立信任层） ------------------------------ */
+
+export const PUBLISHER_SIGNATURE_CONTEXT = 'agentdock-publisher-v1';
+
+/** 发布者签名载荷：与平台签名区分域，防止两类签名互相冒用 */
+export function publisherSignaturePayload({ kind, name, version, contentHash }) {
+  return [PUBLISHER_SIGNATURE_CONTEXT, kind, name, version, contentHash].join('\n');
+}
+
+/** 校验任意 detached ed25519 签名 */
+export function verifyDetachedSignature({ payload, signature, publicKeyPem }) {
+  const reasons = [];
+  if (typeof payload !== 'string' || payload === '') reasons.push('签名载荷为空');
+  if (typeof signature !== 'string' || signature === '') reasons.push('签名为空');
+  let valid = false;
+  try {
+    const key = crypto.createPublicKey(publicKeyPem);
+    valid = crypto.verify(
+      null,
+      Buffer.from(payload || '', 'utf8'),
+      key,
+      Buffer.from(signature || '', 'base64'),
+    );
+  } catch (error) {
+    reasons.push(`公钥或签名无法解析：${error.message}`);
+  }
+  if (!valid && reasons.length === 0) reasons.push('签名校验失败');
+  return { valid: valid && reasons.length === 0, reasons };
+}
+
+/** 从私钥 PEM 推导公钥 PEM（CLI keygen 用） */
+export function publicKeyPemFromPrivate(privateKeyPem) {
+  const key = crypto.createPrivateKey(privateKeyPem);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('只支持 ed25519 私钥');
+  return crypto.createPublicKey(key).export({ type: 'spki', format: 'pem' }).toString();
+}
+
+/** 校验 PEM 是否为可用的 ed25519 公钥 */
+export function isValidEd25519PublicKey(publicKeyPem) {
+  try {
+    const key = crypto.createPublicKey(publicKeyPem);
+    return key.asymmetricKeyType === 'ed25519';
+  } catch {
+    return false;
+  }
+}

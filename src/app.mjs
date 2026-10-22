@@ -10,6 +10,7 @@ import { AppError, badRequest, unauthorized, forbidden, notFound, unprocessable,
 import { LIMITS } from './bundle.mjs';
 import { describeBundle } from './validate.mjs';
 import { diffBundles } from './diff.mjs';
+import { createTransparencyLog } from './transparency.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
 
@@ -41,7 +42,8 @@ const CSP = [
 export function createApp(config = loadConfig()) {
   const users = createUserDirectory(config);
   const audit = createAuditLog(config);
-  const store = createStore(config, { audit });
+  const transparency = createTransparencyLog(config);
+  const store = createStore(config, { audit, users, transparency });
 
   async function handle(req, res) {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -94,6 +96,61 @@ export function createApp(config = loadConfig()) {
     if (route === 'me' && method === 'GET') {
       requireAuth();
       return sendJson(res, 200, { user: auth, roles: ROLES, roleLabels: ROLE_LABEL });
+    }
+
+    // 当前用户的发布者签名密钥（公钥可公开）
+    if (route === 'me/keys' && method === 'GET') {
+      requireAuth();
+      return sendJson(res, 200, { ok: true, keys: users.listKeys(auth.id) });
+    }
+    if (route === 'me/keys' && method === 'POST') {
+      requireRole('publisher');
+      const body = await readBody(req);
+      if (!body || typeof body.name !== 'string' || typeof body.publicKeyPem !== 'string') {
+        throw badRequest('需要 name 与 publicKeyPem');
+      }
+      const key = users.registerKey(auth.id, { name: body.name, publicKeyPem: body.publicKeyPem });
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'user.register_key',
+        target: key.keyId,
+        meta: { name: key.name, algorithm: key.algorithm },
+        ip,
+      });
+      return sendJson(res, 201, { ok: true, key });
+    }
+    const keyDeleteMatch = pathname.match(/^\/api\/v1\/me\/keys\/([A-Za-z0-9]+)$/);
+    if (keyDeleteMatch && method === 'DELETE') {
+      requireAuth();
+      const removed = users.removeKey(auth.id, keyDeleteMatch[1]);
+      return sendJson(res, 200, { ok: true, removed });
+    }
+
+    // 可验证透明日志（公开）
+    if (route === 'transparency/head' && method === 'GET') {
+      return sendJson(res, 200, { ok: true, ...transparency.head() });
+    }
+    if (route === 'transparency/entries' && method === 'GET') {
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') || 50)));
+      const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
+      return sendJson(res, 200, { ok: true, head: transparency.head(), ...transparency.list({ limit, offset }) });
+    }
+    if (route === 'transparency/verify' && method === 'GET') {
+      const result = transparency.verify();
+      return sendJson(res, result.ok ? 200 : 409, { ok: result.ok, ...result });
+    }
+    if (route === 'transparency/proof' && method === 'GET') {
+      const kind = url.searchParams.get('kind') || '';
+      const name = url.searchParams.get('name') || '';
+      const version = url.searchParams.get('version') || '';
+      const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
+      const versionDoc = store.getVersion(kind, name, version);
+      if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+      if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
+      const result = transparency.proof(kind, name, version);
+      if (!result) throw notFound('透明日志中未找到该版本，请联系管理员检查日志');
+      return sendJson(res, 200, { ok: true, kind, name, version, ...result });
     }
 
     if (route === 'targets' && method === 'GET') {
@@ -150,7 +207,7 @@ export function createApp(config = loadConfig()) {
     if (route === 'packages' && method === 'POST') {
       requireRole('publisher');
       const body = await readBody(req);
-      const result = store.publish(body, { actor: auth.name, role: auth.role, ip });
+      const result = store.publish(body, { actor: auth.name, actorId: auth.id, role: auth.role, ip });
       return sendJson(res, 201, {
         ok: true,
         package: result.package,
@@ -190,7 +247,12 @@ export function createApp(config = loadConfig()) {
       if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
       if (url.searchParams.get('verify') === '1') {
         const result = store.verifySignature(kind, name, versionDoc.version);
-        return sendJson(res, 200, { ok: result.valid, ...result, publicKey: store.signingKeyInfo() });
+        return sendJson(res, 200, {
+          ok: result.valid,
+          ...result,
+          publicKey: store.signingKeyInfo(),
+          publisherSignature: versionDoc.publisherSignature ?? null,
+        });
       }
       return sendJson(res, 200, {
         ok: true,
@@ -200,6 +262,7 @@ export function createApp(config = loadConfig()) {
         status: versionDoc.status,
         contentHash: versionDoc.contentHash,
         signature: versionDoc.signature ?? null,
+        publisherSignature: versionDoc.publisherSignature ?? null,
         publicKey: store.signingKeyInfo(),
       });
     }
@@ -411,7 +474,7 @@ export function createApp(config = loadConfig()) {
     });
   });
 
-  return { server, config, users, audit, store };
+  return { server, config, users, audit, store, transparency };
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */
@@ -425,6 +488,7 @@ function publicVersion(versionDoc) {
     tags: versionDoc.tags,
     contentHash: versionDoc.contentHash,
     signature: versionDoc.signature ?? null,
+    publisherSignature: versionDoc.publisherSignature ?? null,
     fileCount: versionDoc.fileCount,
     totalBytes: versionDoc.totalBytes,
     files: versionDoc.files,
