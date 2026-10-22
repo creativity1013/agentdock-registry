@@ -12,6 +12,7 @@ import { describeBundle } from './validate.mjs';
 import { diffBundles } from './diff.mjs';
 import { createTransparencyLog } from './transparency.mjs';
 import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
+import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, PolicyError } from './policy.mjs';
 
 const MAX_BODY = Math.max(LIMITS.maxTotalBytes * 2, 6 * 1024 * 1024);
 
@@ -45,6 +46,8 @@ export function createApp(config = loadConfig()) {
   const audit = createAuditLog(config);
   const transparency = createTransparencyLog(config);
   const store = createStore(config, { audit, users, transparency });
+  const policyState = loadPolicy(config);
+  store.setPolicy(policyState.policy);
 
   async function handle(req, res) {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -243,9 +246,10 @@ export function createApp(config = loadConfig()) {
         ok: true,
         source: imported.source,
         warnings: [...imported.warnings, ...(report.warnings || [])],
+        autoApproved: Boolean(result.autoApproved),
         package: result.package,
         version: publicVersion(result.version),
-        message: '已从外部 registry 导入，等待审核',
+        message: result.autoApproved ? '已从外部 registry 导入并通过策略自动审批' : '已从外部 registry 导入，等待审核',
       });
     }
 
@@ -301,9 +305,10 @@ export function createApp(config = loadConfig()) {
       const result = store.publish(body, { actor: auth.name, actorId: auth.id, role: auth.role, ip });
       return sendJson(res, 201, {
         ok: true,
+        autoApproved: Boolean(result.autoApproved),
         package: result.package,
         version: publicVersion(result.version),
-        message: '已提交，等待审核',
+        message: result.autoApproved ? '已通过策略自动审批并上架' : '已提交，等待审核',
       });
     }
 
@@ -356,6 +361,19 @@ export function createApp(config = loadConfig()) {
         publisherSignature: versionDoc.publisherSignature ?? null,
         publicKey: store.signingKeyInfo(),
       });
+    }
+
+    // 版本 SBOM（软件物料清单）
+    const sbomMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)\/sbom$/);
+    if (sbomMatch && method === 'GET') {
+      const [, kind, name, version] = sbomMatch;
+      const versionDoc = store.getVersion(kind, name, version);
+      if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+      const privileged = Boolean(auth && (auth.role === 'reviewer' || auth.role === 'admin'));
+      if (versionDoc.status !== 'published' && !privileged) throw notFound('该版本尚未发布或未通过审核');
+      const sbom = store.sbom(kind, name, versionDoc.version);
+      if (!sbom) throw notFound('该版本没有 SBOM');
+      return sendJson(res, 200, { ok: true, sbom });
     }
 
     // 下载完整能力包（CLI 安装用）
@@ -479,6 +497,32 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { ok: true, version: publicVersion(versionDoc) });
     }
 
+    // 自动审批策略（读取 reviewer；更新 admin）
+    if (route === 'policy' && method === 'GET') {
+      requireRole('reviewer');
+      return sendJson(res, 200, { ok: true, policy: store.getPolicy(), source: policyState.source, file: policyState.file });
+    }
+
+    if (route === 'policy' && method === 'PUT') {
+      requireRole('admin');
+      const body = await readBody(req);
+      const input = body?.policy ?? body;
+      const next = normalizePolicy(input, store.getPolicy());
+      next.updatedAt = new Date().toISOString();
+      next.updatedBy = auth.name;
+      savePolicy(config, next);
+      store.setPolicy(next);
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'policy.update',
+        target: 'policy.json',
+        meta: { autoApprove: next.autoApprove },
+        ip,
+      });
+      return sendJson(res, 200, { ok: true, policy: next, message: '策略已更新' });
+    }
+
     // 审计日志
     if (route === 'audit' && method === 'GET') {
       requireRole('reviewer');
@@ -589,6 +633,15 @@ function publicVersion(versionDoc) {
     submittedBy: versionDoc.submittedBy,
     review: versionDoc.review,
     installs: versionDoc.installs,
+    sbom: versionDoc.sbom
+      ? {
+          schema: versionDoc.sbom.schema,
+          digest: versionDoc.sbom.digest,
+          components: versionDoc.sbom.summary?.componentCount ?? versionDoc.sbom.components?.length ?? 0,
+          fileCount: versionDoc.sbom.summary?.fileCount ?? versionDoc.sbom.files?.length ?? 0,
+          counts: versionDoc.sbom.summary?.counts ?? null,
+        }
+      : null,
   };
 }
 

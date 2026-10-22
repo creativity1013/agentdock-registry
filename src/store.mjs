@@ -22,6 +22,8 @@ import {
   verifyDetachedSignature,
   keyIdFor,
 } from './signing.mjs';
+import { buildSbom } from './sbom.mjs';
+import { evaluateAutoApproval, defaultPolicy } from './policy.mjs';
 
 export const VERSION_STATUSES = ['pending', 'published', 'rejected'];
 export const VERSION_STATUS_LABEL = { pending: '待审核', published: '已发布', rejected: '已拒绝' };
@@ -44,6 +46,18 @@ export function createStore(config, { audit, users, transparency } = {}) {
   }
 
   let signingKey = null;
+  let autoPolicy = defaultPolicy();
+
+  /** 设置自动审批策略（由 app 启动/更新策略时调用） */
+  function setPolicy(next) {
+    autoPolicy = next;
+    return autoPolicy;
+  }
+
+  function getPolicy() {
+    return autoPolicy;
+  }
+
   const getSigningKey = () => {
     if (!signingKey) signingKey = loadOrCreateSigningKey(config);
     return signingKey;
@@ -168,6 +182,7 @@ export function createStore(config, { audit, users, transparency } = {}) {
     }
 
     const submittedAt = nowIso();
+    const sbom = buildSbom(bundle, report.manifest);
     const versionDoc = {
       version: bundle.version,
       status: 'pending',
@@ -182,15 +197,18 @@ export function createStore(config, { audit, users, transparency } = {}) {
       submittedAt,
       submittedBy: actor,
       publisherSignature,
+      sbom,
       review: null,
       installs: 0,
       overrideScan: Boolean(report.blocked),
     };
-    writeJsonAtomic(path.join(versionDir(bundle.kind, bundle.name, bundle.version), 'meta.json'), {
+    const vdir = versionDir(bundle.kind, bundle.name, bundle.version);
+    writeJsonAtomic(path.join(vdir, 'meta.json'), {
       kind: bundle.kind,
       name: bundle.name,
       ...versionDoc,
     });
+    writeJsonAtomic(path.join(vdir, 'sbom.json'), sbom);
 
     if (!pkg) {
       pkg = {
@@ -215,10 +233,83 @@ export function createStore(config, { audit, users, transparency } = {}) {
       role,
       action: 'package.publish',
       target: `${pkgKey}@${bundle.version}`,
-      meta: { fileCount: versionDoc.fileCount, totalBytes: versionDoc.totalBytes, contentHash: versionDoc.contentHash, blocked: versionDoc.overrideScan },
+      meta: { fileCount: versionDoc.fileCount, totalBytes: versionDoc.totalBytes, contentHash: versionDoc.contentHash, blocked: versionDoc.overrideScan, sbomDigest: versionDoc.sbom.digest },
       ip,
     });
-    return { package: summarizePackage(pkgKey, pkg), version: versionDoc };
+
+    // 策略自动审批：满足条件的版本直接发布（仍会签名 + 写透明日志）
+    let autoApproved = false;
+    if (autoPolicy?.autoApprove?.enabled) {
+      const evaluation = evaluateAutoApproval(autoPolicy, {
+        kind: bundle.kind,
+        fileCount: versionDoc.fileCount,
+        totalBytes: versionDoc.totalBytes,
+        scan: versionDoc.scan?.summary ?? { high: 0, medium: 0, low: 0 },
+        verdictBlocked: Boolean(report.blocked),
+        publisher: actor,
+        publisherSignature: versionDoc.publisherSignature,
+        sbom: versionDoc.sbom,
+      });
+      if (evaluation.approve) {
+        approveVersion(bundle.kind, bundle.name, versionDoc, {
+          actor: 'policy',
+          role: 'auto',
+          ip,
+          note: `自动审批：${evaluation.reasons.join('；')}`,
+          auto: true,
+        });
+        autoApproved = true;
+      } else {
+        audit?.append({
+          actor,
+          role,
+          action: 'review.auto_skipped',
+          target: `${pkgKey}@${bundle.version}`,
+          meta: { failed: evaluation.failed.map((item) => item.rule) },
+          ip,
+        });
+      }
+    }
+    return { package: summarizePackage(pkgKey, pkg), version: versionDoc, autoApproved };
+  }
+
+  /** 标记版本为已发布：签名 + 审核记录 + 透明日志 + 审计（人工与自动共用） */
+  function approveVersion(kind, name, versionDoc, { actor = 'unknown', role = '', ip = '', note = '', auto = false } = {}) {
+    const signature = signVersion(getSigningKey(), {
+      kind,
+      name,
+      version: versionDoc.version,
+      contentHash: versionDoc.contentHash,
+    });
+    versionDoc.status = 'published';
+    versionDoc.review = {
+      decision: 'approve',
+      note: String(note || '').trim(),
+      reviewer: actor,
+      reviewedAt: nowIso(),
+      auto,
+    };
+    versionDoc.signature = signature;
+    persist();
+    audit?.append({
+      actor,
+      role,
+      action: auto ? 'review.auto_approve' : 'review.approve',
+      target: `${kind}/${name}@${versionDoc.version}`,
+      meta: { note: String(note || '').trim().slice(0, 200), keyId: signature.keyId, auto },
+      ip,
+    });
+    transparency?.append({
+      kind,
+      name,
+      version: versionDoc.version,
+      contentHash: versionDoc.contentHash,
+      publisher: versionDoc.submittedBy || '',
+      platformKeyId: signature.keyId,
+      publisherKeyId: versionDoc.publisherSignature?.keyId || '',
+      review: { decision: 'approve', reviewer: actor, auto },
+    });
+    return versionDoc;
   }
 
   /** 审核：approve → published；reject → rejected */
@@ -235,44 +326,25 @@ export function createStore(config, { audit, users, transparency } = {}) {
     if (versionDoc.status !== 'pending') {
       throw conflict(`该版本当前状态为「${VERSION_STATUS_LABEL[versionDoc.status]}」，不能重复审核`);
     }
-    const signature =
-      decision === 'approve'
-        ? signVersion(getSigningKey(), {
-            kind,
-            name,
-            version: versionDoc.version,
-            contentHash: versionDoc.contentHash,
-          })
-        : null;
-    versionDoc.status = decision === 'approve' ? 'published' : 'rejected';
+    if (decision === 'approve') {
+      return approveVersion(kind, name, versionDoc, { actor, role, ip, note });
+    }
+    versionDoc.status = 'rejected';
     versionDoc.review = {
-      decision,
+      decision: 'reject',
       note: note.trim(),
       reviewer: actor,
       reviewedAt: nowIso(),
     };
-    if (signature) versionDoc.signature = signature;
     persist();
     audit?.append({
       actor,
       role,
-      action: decision === 'approve' ? 'review.approve' : 'review.reject',
+      action: 'review.reject',
       target: `${kind}/${name}@${version}`,
-      meta: { note: note.trim().slice(0, 200), ...(signature ? { keyId: signature.keyId } : {}) },
+      meta: { note: note.trim().slice(0, 200) },
       ip,
     });
-    if (decision === 'approve') {
-      transparency?.append({
-        kind,
-        name,
-        version: versionDoc.version,
-        contentHash: versionDoc.contentHash,
-        publisher: versionDoc.submittedBy || '',
-        platformKeyId: versionDoc.signature?.keyId || '',
-        publisherKeyId: versionDoc.publisherSignature?.keyId || '',
-        review: { decision: 'approve', reviewer: actor, auto: Boolean(versionDoc.review?.auto) },
-      });
-    }
     return versionDoc;
   }
 
@@ -577,9 +649,18 @@ export function createStore(config, { audit, users, transparency } = {}) {
     return result;
   }
 
+  /** 获取版本 SBOM */
+  function sbom(kind, name, version) {
+    const versionDoc = getVersion(kind, name, version);
+    return versionDoc?.sbom ?? null;
+  }
+
   return {
     dbFile,
     packagesDir,
+    setPolicy,
+    getPolicy,
+    sbom,
     analyze,
     publish,
     review,

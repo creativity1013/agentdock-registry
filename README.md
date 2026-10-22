@@ -97,6 +97,11 @@ agentdock publish ./my-skill --key ~/.agentdock/keys/alice-private.pem --key-nam
 agentdock transparency verify                           # 校验透明日志哈希链
 agentdock transparency proof skill/my-skill@0.1.0       # 版本包含证明（本地校验 Merkle）
 
+# SBOM 与自动审批策略
+agentdock sbom skill/code-reviewer@0.1.0                # 文件哈希 + 工具/MCP 组件
+agentdock policy show                                   # 查看自动审批策略（reviewer）
+agentdock policy set --file policy.json                 # 更新策略（admin）
+
 # 外部 registry 同步（GitHub / MCP registry）
 agentdock sync sources
 agentdock sync import github acme/skills --path skills/review --dry-run
@@ -121,6 +126,8 @@ agentdock sync export --out marketplace.json            # 中立市场目录（a
 | `keygen` | 生成发布者 ed25519 密钥对（`--out --name --force`；私钥 600、公钥可公开） |
 | `register-key` | 注册发布者公钥（`--key <公钥 PEM> --name`） |
 | `transparency [head\|verify\|entries\|proof <kind/name[@version]>]` | 可验证透明日志：头部 / 验链 / 列表 / 版本 Merkle 包含证明（本地校验） |
+| `sbom <kind/name[@version]>` | 查看版本 SBOM：文件哈希、工具/MCP/技能组件与 digest（`--json`） |
+| `policy show\|set` | 自动审批策略：`show` 读取（reviewer），`set --file <policy.json>` 更新（admin） |
 | `tokens create\|list` | 令牌管理（需 admin） |
 | `import-claude` | 读取 `~/.claude/agents/*.md`，转换为 agent 包；`--presets --presets-dir --profile` 同时生成/并入 DSH preset |
 | `sync sources` | 查看已配置的外部 registry 适配器（GitHub / MCP registry） |
@@ -274,11 +281,14 @@ my-plugin/
 | GET | `/packages/:kind/:name/versions/:version/bundle` | 公开 | 下载完整内容 |
 | GET | `/packages/:kind/:name/versions/:version/files?path=` | 公开 | 预览单个文件 |
 | GET | `/packages/:kind/:name/versions/:version/signature?verify=1` | 公开（pending 需审核权限） | 版本签名；`verify=1` 会重算磁盘内容哈希并验签 |
+| GET | `/packages/:kind/:name/versions/:version/sbom` | 公开（pending 需审核权限） | 版本 SBOM（`agentdock-sbom@1`：文件哈希、组件、digest） |
 | GET | `/packages/:kind/:name/diff?to=&from=` | 公开（pending 需审核权限） | 版本差异（行级 diff；`from` 缺省为上一个已发布版本） |
 | POST | `/packages/:kind/:name/versions/:version/install-event` | 登录 | 登记安装事件 |
 | POST | `/install` | publisher | 安装到目标目录（服务端权限内） |
 | GET | `/review/queue` | reviewer | 待审核队列 |
 | POST | `/review` | reviewer | 审核 `{kind,name,version,decision,note}` |
+| GET | `/policy` | reviewer | 自动审批策略与来源（default / policy.json） |
+| PUT | `/policy` | admin | 更新自动审批策略（整体替换，校验后持久化到 `data/policy.json`） |
 | GET | `/transparency/head` | 公开 | 透明日志头部：事件数、headHash、Merkle 根 |
 | GET | `/transparency/entries?limit=&offset=` | 公开 | 透明日志事件（最新在前） |
 | GET | `/transparency/verify` | 公开 | 校验整条哈希链（篡改返回 409） |
@@ -327,6 +337,8 @@ my-plugin/
 
 CLI 登录信息保存在 `~/.agentdock/config.json`（权限 600）。
 
+自动审批策略持久化在 `data/policy.json`（`PUT /api/v1/policy` 或 `agentdock policy set` 写入，重启后仍生效）；每个版本的 SBOM 随发布写盘到 `data/packages/<kind>/<name>/<version>/sbom.json`。
+
 ## 导入 Claude Code agents
 
 ```bash
@@ -369,6 +381,50 @@ agentdock sync export --out marketplace.json               # 中立市场目录
 安全边界（避免把服务变成 SSRF 跳板）：外部 base URL 只能来自服务端环境变量 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY`，请求体只接受 `repo` / `path` / `ref` / `name` 等标识符，不接受任意 URL；单次导入限制 200 文件、单文件 512KB、总量 2MB，网络请求 15s 超时；导入需要 publisher 权限，并写审计 `sync.import`。
 
 导出格式（`GET /api/v1/registry/export`）是中立目录 `agentdock-marketplace@1`：每个已发布能力包的最新版本包含 `bundleUrl`、`contentHash`、平台签名与发布者签名摘要，`digest` 为整体哈希；其他 harness 可按需映射到自己的 marketplace 清单。
+
+## SBOM 与自动审批策略
+
+### SBOM（软件物料清单）
+
+每次发布都会生成 `agentdock-sbom@1`，随版本落盘（`sbom.json`）并对外可查：
+
+- `subject`：kind / name / version / contentHash
+- `files[]`：路径、字节数、sha256
+- `components[]`：能力包声明的外部依赖——`tool`（agent/skill 的工具）、`mcp-server`（plugin/agent 声明的 MCP server，含 command/url）、`skill`（引用的技能）
+- `summary`：文件数/总体积/组件计数
+- `digest`：对上述规范内容做 sha256（可复现，不含生成时间）
+
+```bash
+agentdock sbom skill/code-reviewer@0.1.0
+curl http://127.0.0.1:7788/api/v1/packages/skill/code-reviewer/versions/0.1.0/sbom
+```
+
+SBOM 记录的是**声明**（能力包声称依赖什么），不等同于对依赖真实性的验证；它用于审核、归档和供应链比对。
+
+### 按策略自动审批
+
+默认关闭。开启后，满足全部条件的版本在发布时直接上架（仍会写平台签名、透明日志与审计），其余进入人工审核队列。
+
+```json
+{
+  "autoApprove": {
+    "enabled": true,
+    "kinds": ["skill"],
+    "trustedPublishers": ["ci-bot"],
+    "requirePublisherSignature": true,
+    "maxMedium": 0,
+    "maxFiles": 100,
+    "maxTotalBytes": 2097152
+  }
+}
+```
+
+```bash
+agentdock policy set --file policy.json   # admin
+agentdock policy show                     # reviewer
+```
+
+规则：`kinds` 白名单、`trustedPublishers` 白名单（空数组表示不限制发布者）、`requirePublisherSignature`、高危必须为 0、中危不超过 `maxMedium`、文件数/总体积上限、扫描未命中阻断阈值、且已生成 SBOM。未通过自动审批的版本会记录 `review.auto_skipped` 审计事件（含失败规则）；自动通过的版本记录 `review.auto_approve`，透明日志事件带 `review.auto: true`。
 
 ## 部署（Docker / CI）
 
@@ -417,6 +473,8 @@ agentdock/
 │   ├── signing.mjs          # ed25519 内容签名/验签（审核通过即签名，公钥公开）+ 发布者签名
 │   ├── transparency.mjs     # 可验证透明日志（哈希链 + Merkle 树 + 包含证明）
 │   ├── registry.mjs         # 外部 registry 互操作（GitHub / MCP registry 导入 + 市场目录导出）
+│   ├── sbom.mjs             # SBOM 生成（文件哈希 + 工具/MCP/技能组件 + digest）
+│   ├── policy.mjs           # 自动审批策略（归一化/校验/规则求值）
 │   ├── auth.mjs             # 令牌/角色
 │   ├── audit.mjs            # JSONL 审计
 │   ├── config.mjs           # 配置与数据目录
@@ -427,7 +485,7 @@ agentdock/
 ├── .github/workflows/ci.yml # CI：Node 20/22/24 测试矩阵 + Docker 健康检查
 ├── examples/                # 三类示例能力包
 ├── scripts/                 # smoke + 批量发布示例
-├── tests/                   # node:test 测试（73 个用例）
+├── tests/                   # node:test 测试（84 个用例）
 └── data/                    # 运行时数据（git 忽略）
 ```
 
@@ -459,7 +517,8 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - 平台签名证明「内容经本平台审核且未被替换」，**不**等价于发布者身份或供应链来源。
 - **发布者签名（可选）**：`publish --key` 用发布者自己持有的 ed25519 私钥对载荷 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥发布时自动 TOFU 注册（等价于 `POST /api/v1/me/keys`）。签名覆盖内容哈希，因此可证明「该版本由持有对应私钥的人提交」。
 - **可验证透明日志**：每个版本审核通过时向 `data/transparency.log` 追加一条哈希链事件（contentHash、发布者、平台 keyId、发布者 keyId、审核人），事件哈希按 RFC 6962 风格构造 Merkle 树；任何人可通过 `GET /api/v1/transparency/verify` 校验整条链、通过 `GET .../proof` 获取某个版本的包含证明，并用 CLI `transparency verify|proof` 本地校验。日志 append-only，与平台签名交叉印证上架历史。
-- 外部 registry 导入受服务端出口白名单限制（见上节），导入内容需审核后才能发布；当前无 SSO/多租户。
+- **SBOM 与自动审批**：每个版本生成 `agentdock-sbom@1` 清单，记录文件哈希与声明的工具/MCP/技能组件；自动审批默认关闭，开启后只对策略白名单内、无高危、体积达标的版本生效，自动通过的版本同样有平台签名、透明日志与审计，可事后完整追溯。
+- 外部 registry 导入受服务端出口白名单限制（见上节），导入内容一律走同一校验/扫描流程，只有命中自动审批策略时才会跳过人工审核；当前无 SSO/多租户。
 - diff 视图只做行级对比：二进制文件仅标记变化，超大文件（>512KB 或 >2000 行）退化为整文件标记。
 
 ## Roadmap
@@ -470,7 +529,7 @@ npm run examples:publish  # 把示例发布到已运行的服务（可加 -- --a
 - [x] 发布者密钥签名 / 可验证透明日志（透明日志记录所有上架事件）
 - [x] DSH agent preset 安装目标（`dsh-agent`，生成 preset 片段并可按 profile 合并）
 - [x] 外部 registry 互操作：GitHub / MCP registry 导入 + 中立市场目录导出（skills.sh 的 `SKILL.md` 可经 GitHub 导入）
-- [ ] 依赖清单与 SBOM、按策略自动审批
+- [x] 依赖清单与 SBOM、按策略自动审批（`data/policy.json` + `review.auto_approve`）
 - [ ] SQLite 存储后端（>1 万包规模）
 
 ## License

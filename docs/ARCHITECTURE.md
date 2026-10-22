@@ -45,9 +45,14 @@ validateBundle()                    按 kind 校验结构，产出 manifest（�
   ▼
 scanBundle() + scanVerdict()        安全规则扫描，按阈值判定是否阻断
   ▼
-store.publish()                     版本写入 pending 状态（meta.json + files/ 落盘）
+store.publish()                     归一化后的内容落盘（files/ + meta.json）
+  ├ 生成 SBOM（sbom.json + version.sbom，含文件哈希与组件清单）
+  ├ 按策略评估（data/policy.json，默认关闭）
+  │   ├ 通过 → approveVersion()：平台签名 → status=published
+  │   └ 不通过 → status=pending（进入人工审核队列）
   ▼
-audit.append('package.publish')     审计
+audit.append('package.publish')
+  └ 自动审批另有 review.auto_approve（通过）/ review.auto_skipped（含失败规则）
 ```
 
 `analyzeInput()`（src/pipeline.mjs）把「归一化 → 校验 → 扫描」封装成纯函数：服务端发布、CLI `verify`、CLI 发布前预检、`import-claude` 共享同一套逻辑，保证线上线下判断一致。
@@ -57,10 +62,11 @@ audit.append('package.publish')     审计
 ```
 reviewer: POST /api/v1/review {kind,name,version,decision,note}
   ▼ 权限校验（role ≥ reviewer）+ 版本必须处于 pending
-store.review()  ── approve → status=published（冻结，不可覆盖）
+store.review()  ── approve → approveVersion()：签名后 status=published（冻结）
                 └ reject  → status=rejected（可覆盖重提）
+approveVersion() 同时被自动审批复用（reviewer 记为 policy:auto，review.auto=true）
   ▼
-audit.append('review.approve' | 'review.reject')
+audit.append('review.approve' | 'review.auto_approve' | 'review.reject')
 
 审核界面另调 GET /api/v1/packages/:kind/:name/diff?to=<version>
   └ 默认基线为「上一个已发布版本」；pending 版本仅 reviewer/admin 可见；
@@ -92,9 +98,11 @@ data/
 ├── BOOTSTRAP-TOKENS.txt         # 首次启动的明文令牌（600，可删）
 ├── audit.log                    # append-only JSONL 审计
 ├── transparency.log             # 可验证透明日志（哈希链，append-only，审核通过时追加）
+├── policy.json                  # 自动审批策略（可缺省；缺省等同关闭）
 └── packages/
     └── <kind>/<name>/<version>/
-        ├── meta.json            # 版本元数据（状态、扫描、审核、文件清单、哈希）
+        ├── meta.json            # 版本元数据（状态、扫描、审核、文件清单、哈希、签名、SBOM 摘要）
+        ├── sbom.json            # 该版本 SBOM（agentdock-sbom@1，随发布生成）
         └── files/               # 能力包原始内容（按包内相对路径）
             └── SKILL.md
 ```
@@ -123,7 +131,8 @@ data/
           "totalBytes": 512,
           "manifest": { "title": "…", "description": "…", "capabilities": {} },
           "scan": { "summary": { "high": 0, "medium": 1, "low": 2, "total": 3 }, "findings": [] },
-          "review": { "reviewer": "reviewer", "decision": "approve", "note": "LGTM", "at": "…" },
+          "review": { "reviewer": "reviewer", "decision": "approve", "note": "LGTM", "at": "…", "auto": false },
+          "sbom": { "schema": "agentdock-sbom@1", "digest": "sha256:…", "fileCount": 1, "componentCount": 0 },
           "files": [{ "path": "SKILL.md", "encoding": "utf8", "bytes": 512, "sha256": "…" }],
           "createdAt": "…",
           "updatedAt": "…"
@@ -189,6 +198,21 @@ data/
 - `GET /api/v1/transparency/verify` 重算每条事件哈希与链关系，返回 `{ok,size,headHash,brokenAt,reasons}`；`GET .../proof?kind&name&version` 返回 `{entry,index,size,root,proof}`（Merkle 树叶子为事件 `hash`，叶/节点前缀 0x00/0x01）。
 - CLI `transparency verify` 验链、`transparency proof <kind/name[@version]>` 用 `verifyInclusionProof` 本地校验包含证明。
 
+### SBOM（sbom.json + version.sbom）
+
+每个版本发布时生成 `agentdock-sbom@1`：
+
+- `files[]`：`{path,bytes,sha256}`
+- `components[]`：声明的外部依赖，`type` 为 `tool` / `mcp-server` / `skill`（来自 manifest 的 tools、capabilities.mcpConfigs/mcp、capabilities.skills）
+- `summary`：文件数、总体积、各类型组件计数
+- `digest`：`sha256(JSON({schema,subject,files,components,summary}))`，可复现（不含 generatedAt）
+
+落盘为 `sbom.json`，并在 `db.json` 的版本记录里保留摘要（`version.sbom`）；接口 `GET .../versions/:version/sbom`。SBOM 记录的是**声明**，只用于审核/归档/供应链比对，不代表依赖真实性已验证。
+
+### 自动审批策略（policy.json）
+
+`data/policy.json` 由 admin 通过 `PUT /api/v1/policy` 或 `agentdock policy set` 写入，启动时 `loadPolicy()` 读取（缺省 `source=default`，即关闭）。规则求值在 `policy.evaluateAutoApproval()` 中完成，全部通过才自动上架：`enabled`、kind 白名单、发布者白名单（空=不限）、是否要求发布者签名、高危=0、中危 ≤ maxMedium、文件数/体积上限、扫描未达阻断阈值、SBOM 已生成。自动通过的版本仍会：平台签名、写透明日志（`review.auto=true`）、写审计 `review.auto_approve`；未通过记录 `review.auto_skipped` 及失败规则，便于事后解释。
+
 ### meta.json 与 db.json 的关系
 
 `db.json` 是热索引（市场列表、审核队列、安装计数直接读它），`meta.json` 是版本目录内的自描述副本（便于备份/迁移/人工检查）。写入时先落 meta + files，再原子更新 db.json。当前没有自动重建索引的接口：迁移时可从 `packages/<kind>/<name>/<version>/meta.json` 人工恢复（重建索引列入 roadmap）。
@@ -204,19 +228,21 @@ data/
 | `src/scan.mjs` | 安全规则引擎 | `scanBundle`、`scanVerdict`、`SEVERITY_ORDER` |
 | `src/pipeline.mjs` | 纯函数流水线 | `analyzeInput` |
 | `src/diff.mjs` | 行级/文件级差异（LCS + 规模上限降级） | `diffLines`、`diffBundles` |
-| `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature`） |
+| `src/store.mjs` | 版本库、状态机、安装计数 | `createStore`（`publish/review/approveVersion/getVersion/requirePublished/bundleContent/fileContent/listPackages/packageDetail/reviewQueue/recordInstall/stats/latestPublished/signingKeyInfo/verifySignature/setPolicy/getPolicy/sbom`） |
 | `src/targets.mjs` | 安装目标解析与落盘 | `planInstall`、`applyInstall`、`installDestination`、`listTargets` |
 | `src/dsh-preset.mjs` | agent 包 → DSH agent-preset 片段；profile patch 合并 | `renderPresetPatch`、`writePresetFragment`、`upsertProfilePatch`、`presetIdFor`、`dshHome` |
 | `src/signing.mjs` | ed25519 内容签名/验签（平台密钥 + 发布者 detached 签名） | `loadOrCreateSigningKey`、`signVersion`、`verifyVersionSignature`、`signaturePayload`、`publisherSignaturePayload`、`verifyDetachedSignature`、`keyIdFor` |
 | `src/transparency.mjs` | 可验证透明日志：哈希链 + RFC 6962 风格 Merkle 树 + 包含证明 | `createTransparencyLog`、`entryHash`、`merkleRoot`、`inclusionProof`、`verifyInclusionProof` |
 | `src/registry.mjs` | 外部 registry 互操作：GitHub / MCP registry 导入、中立市场目录导出 | `importFromGitHub`、`importFromMcpRegistry`、`mcpServerToPlugin`、`buildMarketplaceCatalog`、`describeAdapters`、`slugifyName`、`detectKind` |
+| `src/sbom.mjs` | 版本 SBOM 生成与 digest（文件哈希 + 工具/MCP/技能组件） | `buildSbom`、`sbomDigest`、`SBOM_SCHEMA` |
+| `src/policy.mjs` | 自动审批策略：归一化/校验/规则求值/读写 | `normalizePolicy`、`evaluateAutoApproval`、`loadPolicy`、`savePolicy`、`defaultPolicy` |
 | `src/auth.mjs` | 用户/令牌/角色 + 发布者公钥目录 | `createUserDirectory`（`authenticate/listKeys/registerKey/removeKey/findKey/keysOf`）、`tokenFromRequest` |
 | `src/audit.mjs` | append-only 审计 | `createAuditLog`（`append/read`） |
 | `src/app.mjs` | 路由、鉴权、错误映射、静态文件 | `createApp` |
 | `server.mjs` | 启动入口、连接信息输出 | `startServer` |
 | `cli/agentdock.mjs` | 命令行、本地校验、导入器 | — |
 
-依赖方向：`cli / server → app → store / targets / pipeline / diff / registry → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
+依赖方向：`cli / server → app → store / targets / pipeline / diff / registry / policy / sbom → bundle / validate / scan → yaml / util / errors`。`pipeline` 与 `targets` 之外不依赖 fs 全局状态，便于测试注入 `config`。
 
 ## 5. 安全模型
 
@@ -230,6 +256,7 @@ data/
 8. **发布者签名（可选）**：发布者用自有 ed25519 私钥对 `agentdock-publisher-v1\n<kind>\n<name>\n<version>\n<contentHash>` 签名，服务端校验后写入 `version.publisherSignature`；首次携带公钥时 TOFU 注册到 `users.json` 的 `keys[]`（等价 `POST /me/keys`）。平台签名证明「审过且未被替换」，发布者签名证明「谁提交的」。
 9. **可验证透明日志**：审核通过时向 `transparency.log` 追加哈希链事件（contentHash、发布者、平台/发布者 keyId、审核人），事件哈希构造 RFC 6962 风格 Merkle 树；`/transparency/verify` 校验整链，`/transparency/proof` 返回包含证明，CLI 使用 `verifyInclusionProof` 本地校验。`audit.log` 面向运维（含 IP/角色），`transparency.log` 面向外部可复核（不含敏感字段）。
 10. **外部 registry 导入**（`registry.mjs`）：只从服务端配置的 `AGENTDOCK_GITHUB_API` / `AGENTDOCK_MCP_REGISTRY` 读取，请求体不接受任意 URL（防 SSRF）；单次 200 文件 / 单文件 512KB / 总量 2MB、15s 超时；外部内容一律走同一 normalize → validate → scan 流水线，导入后为 `pending`，必须审核才能上架；导入操作需 publisher 权限并记录审计 `sync.import`。
+11. **SBOM 与自动审批**：每个版本生成 `agentdock-sbom@1`（文件哈希 + 声明的工具/MCP/技能组件 + 可复现 digest），供审核与供应链比对；自动审批默认关闭，开启后仅对策略白名单内、无高危、体积达标且（可选）带发布者签名的版本生效，自动通过的版本同样有平台签名、透明日志与审计，未通过记录失败规则，保证「放宽人工审核」不牺牲可追溯性。
 
 ## 6. 安装目标模型
 
@@ -310,8 +337,8 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 ## 9. 测试策略
 
-- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency / registry——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
-- **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
+- **单元测试**：yaml / bundle / validate / scan / targets / dsh-preset / diff / signing / transparency / registry / sbom / policy——纯函数，覆盖正常与边界（路径穿越、体积、编码、frontmatter 字段、preset 渲染与 profile 合并幂等、diff 行号与降级、签名载荷篡改/换钥/密钥持久化、Merkle 包含证明任意大小/位置、日志篡改定位）。
+- **接口测试**（`tests/api.test.mjs`）：真实启动 HTTP 服务（随机端口、临时数据目录），覆盖完整闭环：发布 → 待审核不可见 → 审核 → 上架 → 下载 → 安装 → 计数 → 审计 → 令牌管理 → 权限边界 → 阻断/覆盖；另覆盖策略更新权限、自动审批上架、SBOM 接口与版本详情 SBOM 摘要。外部 registry 测试用本地 mock HTTP 服务（GitHub contents API / MCP registry 响应）注入 `fetchImpl` 或配置，验证导入 → 待审核 → 审核 → 导出目录闭环，无需访问公网。
 - **端到端冒烟**（`scripts/smoke.mjs`）：真实 `server` + 真实 `cli` 子进程 + 真实落盘，验证 CLI 输出与文件系统结果。
 - 测试全部用 `node:test`，无外部服务；`npm test` 与 `npm run smoke` 均可在 CI 中直接跑。
 
@@ -352,7 +379,31 @@ DSH 的 profile 是插件 bundle 补丁层的有序堆叠，用户层是 `$DSH_H
 
 **不做双向推送**：向 GitHub / skills.sh / MCP registry 主动发布需要各自平台 API、鉴权与审核政策，风险与维护成本高；当前导出中立目录 + 订阅方拉取已能满足「同步」，后续若需要可基于同一适配器接口扩展 push。
 
-## 11. 部署形态
+## 11. SBOM 与自动审批策略
+
+**SBOM**（`src/sbom.mjs`）：`buildSbom(bundle, manifest)` 在发布时同步生成，纯函数、可复现（`digest` 不含时间戳），落 `sbom.json` 并把摘要写进 `version.sbom`。组件来源：agent/skill 的 `tools`、agent 的 `mcp[]`、plugin 的 `capabilities.mcpConfigs`、agent/skill 的 `skills[]` 或 skill 包自身。`GET /api/v1/packages/:kind/:name/versions/:version/sbom` 与 `agentdock sbom <kind/name[@version]>` 对外暴露。
+
+**自动审批**（`src/policy.mjs`）：策略文件 `data/policy.json`，默认关闭。
+
+```jsonc
+{
+  "schema": "agentdock-policy@1",
+  "updatedAt": "…", "updatedBy": "admin",
+  "autoApprove": {
+    "enabled": true,
+    "kinds": ["skill"],
+    "trustedPublishers": ["ci-bot"],   // 空数组 = 不限制发布者
+    "requirePublisherSignature": true,
+    "maxMedium": 0,
+    "maxFiles": 100,
+    "maxTotalBytes": 2097152
+  }
+}
+```
+
+求值发生在 `store.publish()` 内、写完 SBOM 之后：`evaluateAutoApproval(policy, ctx)` 返回 `{approve, reasons, failed[]}`；通过则调用与人工审核相同的 `approveVersion()`（平台签名 + 透明日志 `review.auto=true` + 审计 `review.auto_approve`），否则保持 pending 并记录 `review.auto_skipped`（含每条失败规则）。策略变更写审计 `policy.update`；读取需 reviewer，修改需 admin。这样「无人值守上架」与「人工审核」共用同一状态机与可验证记录，不存在旁路。
+
+## 12. 部署形态
 
 | 形态 | 入口 | 说明 |
 | --- | --- | --- |

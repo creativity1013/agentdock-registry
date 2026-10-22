@@ -725,3 +725,77 @@ test('外部 registry 同步：GitHub 导入 → 待审核 → 发布 → 市场
   const auditLog = await request('GET', '/audit?limit=100', { token: reviewer });
   assert.ok(auditLog.data.items.some((item) => item.action === 'sync.import' && item.target.includes('synced-skill')));
 });
+
+test('自动审批策略与 SBOM：权限、自动上架、透明日志、SBOM 接口', async (t) => {
+  const app = await startTestServer();
+  t.after(() => app.close());
+  const { request, tokens } = app;
+  const publisher = tokens.publisher;
+  const reviewer = tokens.reviewer;
+  const admin = tokens.admin;
+
+  // 查询策略需要 reviewer；默认关闭
+  const deniedGet = await request('GET', '/policy', { token: publisher });
+  assert.equal(deniedGet.status, 403);
+  const policy0 = await request('GET', '/policy', { token: reviewer });
+  assert.equal(policy0.status, 200);
+  assert.equal(policy0.data.policy.autoApprove.enabled, false);
+  assert.equal(policy0.data.source, 'default');
+
+  // 更新策略仅 admin
+  const deniedPut = await request('PUT', '/policy', { token: reviewer, body: { autoApprove: { enabled: true } } });
+  assert.equal(deniedPut.status, 403);
+
+  // admin 启用自动审批：允许 skill、信任 publisher、中危 0
+  const put = await request('PUT', '/policy', {
+    token: admin,
+    body: { policy: { autoApprove: { enabled: true, kinds: ['skill'], trustedPublishers: ['publisher'], maxMedium: 0 } } },
+  });
+  assert.equal(put.status, 200, JSON.stringify(put.data));
+  assert.equal(put.data.policy.autoApprove.enabled, true);
+
+  // 发布 → 策略自动通过（已签名、已写透明日志）
+  const payload = skillPayload({ name: 'auto-skill', description: '自动审批测试' });
+  payload.files[0].content = '---\nname: auto-skill\ndescription: 自动审批测试\n---\n\n自动审批技能。\n';
+  const published = await request('POST', '/packages', { token: publisher, body: payload });
+  assert.equal(published.status, 201, JSON.stringify(published.data));
+  assert.equal(published.data.autoApproved, true);
+  assert.equal(published.data.version.status, 'published');
+  assert.equal(published.data.version.review.auto, true);
+  assert.ok(published.data.version.signature?.signature);
+  assert.ok(published.data.version.sbom?.digest);
+
+  // 已发布版本的 SBOM 匿名可读
+  const sbom = await request('GET', '/packages/skill/auto-skill/versions/0.1.0/sbom');
+  assert.equal(sbom.status, 200);
+  assert.equal(sbom.data.sbom.schema, 'agentdock-sbom@1');
+  assert.equal(sbom.data.sbom.files[0].path, 'SKILL.md');
+  assert.ok(sbom.data.sbom.components.some((component) => component.type === 'skill'));
+  assert.equal(sbom.data.sbom.digest.length, 64);
+
+  // 关闭策略后发布 → 待审核；待审核 SBOM 匿名不可见、reviewer 可读
+  const disabled = await request('PUT', '/policy', {
+    token: admin,
+    body: { policy: { autoApprove: { enabled: false } } },
+  });
+  assert.equal(disabled.status, 200);
+  const pendingPayload = skillPayload({ name: 'auto-skill', version: '0.2.0', description: '自动审批测试 v2' });
+  pendingPayload.files[0].content = '---\nname: auto-skill\ndescription: 自动审批测试 v2\n---\n\nv2。\n';
+  const pending = await request('POST', '/packages', { token: publisher, body: pendingPayload });
+  assert.equal(pending.status, 201);
+  assert.equal(pending.data.autoApproved, false);
+  assert.equal(pending.data.version.status, 'pending');
+  const anonPendingSbom = await request('GET', '/packages/skill/auto-skill/versions/0.2.0/sbom');
+  assert.equal(anonPendingSbom.status, 404);
+  const reviewerSbom = await request('GET', '/packages/skill/auto-skill/versions/0.2.0/sbom', { token: reviewer });
+  assert.equal(reviewerSbom.status, 200);
+
+  // 审计与透明日志
+  const auditLog = await request('GET', '/audit?limit=100', { token: reviewer });
+  assert.ok(auditLog.data.items.some((item) => item.action === 'review.auto_approve' && item.target.includes('auto-skill')));
+  assert.ok(auditLog.data.items.some((item) => item.action === 'policy.update'));
+  const transparency = await request('GET', '/transparency/entries?limit=10');
+  assert.ok(
+    transparency.data.items.some((entry) => entry.name === 'auto-skill' && entry.review?.auto === true),
+  );
+});

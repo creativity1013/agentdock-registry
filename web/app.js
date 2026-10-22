@@ -570,6 +570,69 @@ function paintDiff(pkg, data) {
   );
 }
 
+/* ------------------------------ SBOM 视图 ------------------------------ */
+
+async function openSbom(pkg, version) {
+  const modal = $('#diff-modal');
+  const body = $('#diff-body');
+  body.replaceChildren(h('p', { class: 'muted' }, '加载 SBOM 中…'));
+  modal.classList.remove('hidden');
+  try {
+    const data = await api(
+      `/packages/${encodeURIComponent(pkg.kind)}/${encodeURIComponent(pkg.name)}/versions/${encodeURIComponent(version)}/sbom`,
+    );
+    paintSbom(pkg, data.sbom);
+  } catch (error) {
+    body.replaceChildren(h('div', { class: 'empty' }, `无法加载 SBOM：${error.message}`));
+  }
+}
+
+function paintSbom(pkg, sbom) {
+  const body = $('#diff-body');
+  const head = h(
+    'div',
+    { class: 'detail-head' },
+    kindChip(pkg.kind),
+    h('h2', {}, pkg.name),
+    h('span', { class: 'version' }, `v${sbom.subject.version} · SBOM`),
+  );
+  const stats = h(
+    'div',
+    { class: 'diff-stats' },
+    h('span', { class: 'chip' }, sbom.schema),
+    h('span', { class: 'chip' }, `文件 ${sbom.summary.fileCount}`),
+    h('span', { class: 'chip' }, `组件 ${sbom.summary.componentCount}`),
+    h('span', { class: 'chip' }, `总计 ${kb(sbom.summary.totalBytes)}`),
+  );
+  const digest = h('p', { class: 'hint mono' }, `digest ${sbom.digest}`);
+  const componentRows = sbom.components.length
+    ? sbom.components.map((component) =>
+        h(
+          'div',
+          { class: 'file-row' },
+          h('span', { class: 'mono' }, `[${component.type}]`),
+          h('span', {}, component.name),
+          h('span', { class: 'size mono' }, component.command || component.url || ''),
+        ),
+      )
+    : [h('div', { class: 'empty' }, '没有外部依赖声明')];
+  const fileRows = sbom.files.map((file) =>
+    h(
+      'div',
+      { class: 'file-row' },
+      h('span', { class: 'mono' }, file.path),
+      h('span', { class: 'size mono' }, `${kb(file.bytes)} · ${file.sha256.slice(0, 16)}…`),
+    ),
+  );
+  body.replaceChildren(
+    head,
+    stats,
+    digest,
+    h('div', { class: 'panel' }, h('h3', {}, '组件（依赖声明）'), h('div', { class: 'file-list' }, ...componentRows)),
+    h('div', { class: 'panel' }, h('h3', {}, '文件清单'), h('div', { class: 'file-list' }, ...fileRows)),
+  );
+}
+
 /* ------------------------------ 详情弹窗 ------------------------------ */
 
 async function openDetail(kind, name) {
@@ -737,11 +800,17 @@ function paintDetail() {
                 },
               }, `v${version.version}`),
               statusChip(version.status, version.statusLabel),
+              version.review?.auto ? h('span', { class: 'chip auto' }, '自动审批') : null,
               h('button', {
                 class: 'btn btn-ghost btn-sm',
                 type: 'button',
                 onClick: () => openDiff(pkg, version.version),
               }, '差异'),
+              h('button', {
+                class: 'btn btn-ghost btn-sm',
+                type: 'button',
+                onClick: () => openSbom(pkg, version.version),
+              }, 'SBOM'),
               h('span', { class: 'grow muted' }, `${version.fileCount} 文件 · ${kb(version.totalBytes)} · ${fmtTime(version.submittedAt)} · ${version.submittedBy}`),
               ...scanChips(version.scan),
             ),

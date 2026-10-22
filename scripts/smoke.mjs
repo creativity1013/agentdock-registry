@@ -182,6 +182,32 @@ async function main() {
   assert(catalog.items.every((item) => item.bundleUrl && item.contentHash.length === 64), '市场目录缺少 bundleUrl/contentHash');
   console.log('✓ 外部 registry：适配器信息与市场目录导出正常');
 
+  // SBOM + 自动审批策略
+  const sbomOut = await runCli(['sbom', 'skill/code-reviewer@0.2.0'], tokens.publisher);
+  assert(sbomOut.includes('SBOM agentdock-sbom@1') && sbomOut.includes('digest'), `CLI sbom 输出异常：\n${sbomOut}`);
+  const policyBefore = await runCli(['policy', 'show'], tokens.reviewer);
+  assert(policyBefore.includes('启用：否'), `默认策略应关闭：\n${policyBefore}`);
+  const policyFile = path.join(root, 'policy.json');
+  fs.writeFileSync(
+    policyFile,
+    JSON.stringify({ autoApprove: { enabled: true, kinds: ['skill'], trustedPublishers: ['publisher'], maxMedium: 0 } }),
+  );
+  await runCli(['policy', 'set', '--file', policyFile], tokens.admin);
+  const policyAfter = await runCli(['policy', 'show'], tokens.reviewer);
+  assert(policyAfter.includes('启用：是') && policyAfter.includes('publisher'), `策略更新失败：\n${policyAfter}`);
+  const autoPublish = await runCli(
+    ['publish', path.join(EXAMPLES, 'skill-code-reviewer'), '--version', '0.3.0'],
+    tokens.publisher,
+  );
+  assert(autoPublish.includes('自动审批'), `批准策略未生效：\n${autoPublish}`);
+  const autoVerified = await runCli(['verify-signature', 'skill/code-reviewer@0.3.0'], tokens.publisher);
+  assert(autoVerified.includes('签名有效'), `自动审批版本验签失败：\n${autoVerified}`);
+  const autoEntries = await runCli(['transparency', 'entries', '--limit', '10'], tokens.reviewer);
+  assert(autoEntries.includes('skill/code-reviewer@0.3.0'), '透明日志缺少自动审批版本');
+  const autoSbom = await runCli(['sbom', 'skill/code-reviewer@0.3.0'], tokens.publisher);
+  assert(autoSbom.includes('SBOM agentdock-sbom@1'), `自动审批版本 SBOM 异常：\n${autoSbom}`);
+  console.log('✓ SBOM + 自动审批策略：策略下发 / 自动上架 / 验签 / 透明日志 / SBOM 均正常');
+
   // 冒烟结果
   const stats = await fetch(`${server.url}/api/v1/stats`).then((response) => response.json());
   console.log('');

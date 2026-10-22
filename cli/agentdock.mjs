@@ -50,6 +50,9 @@ const HELP = `AgentDock — 跨 harness 的 skill / agent / plugin 能力市场�
   agentdock transparency [head|verify|entries|proof <kind>/<name>[@version]]
                                                    可验证透明日志：查看头部 / 验链 / 列表 / 版本包含证明
 
+  agentdock sbom <kind>/<name>[@version]            查看版本 SBOM（文件哈希 + 工具/MCP 组件）
+  agentdock policy show                             查看自动审批策略（需 reviewer）
+  agentdock policy set --file <policy.json>         更新自动审批策略（需 admin）
   agentdock sync sources                           查看已配置的外部 registry 适配器
   agentdock sync import github <owner/repo> [--path 子目录] [--ref 分支] [--version 0.1.0] [--dry-run]
                                                    从 GitHub 导入 skill/agent/plugin，进入待审核队列
@@ -385,7 +388,8 @@ async function cmdPublish(positionals, flags) {
     ...payload,
     overrideScan: Boolean(flags['override-scan']),
   });
-  console.log(`✓ 已提交 ${result.package.kind}/${result.package.name}@${result.version.version}，等待审核`);
+  const statusNote = result.autoApproved ? '已通过策略自动审批并上架' : '等待审核';
+  console.log(`✓ 已提交 ${result.package.kind}/${result.package.name}@${result.version.version}，${statusNote}`);
   if (result.version.scan?.summary?.total) {
     const summary = result.version.scan.summary;
     console.log(`  安全扫描：高危 ${summary.high} / 中危 ${summary.medium} / 低危 ${summary.low}`);
@@ -620,6 +624,69 @@ async function cmdTransparency(positionals, flags) {
   throw new Error(`未知子命令：transparency ${sub}（支持 head / verify / entries / proof）`);
 }
 
+async function cmdPolicy(positionals, flags) {
+  const conn = resolveConnection(flags);
+  const sub = positionals[0] || 'show';
+  if (sub === 'show') {
+    const data = await api(conn, 'GET', '/api/v1/policy');
+    if (flags.json) return console.log(JSON.stringify(data, null, 2));
+    const auto = data.policy.autoApprove;
+    console.log(`自动审批策略（来源：${data.source === 'file' ? 'policy.json' : '默认值'}）`);
+    console.log(`  启用：${auto.enabled ? '是' : '否'}`);
+    console.log(`  允许 kind：${auto.kinds.join(', ')}`);
+    console.log(`  信任发布者：${auto.trustedPublishers.length ? auto.trustedPublishers.join(', ') : '（不限）'}`);
+    console.log(`  要求发布者签名：${auto.requirePublisherSignature ? '是' : '否'}`);
+    console.log(`  中危上限：${auto.maxMedium}`);
+    console.log(`  文件数上限：${auto.maxFiles}  体积上限：${formatBytes(auto.maxTotalBytes)}`);
+    if (data.policy.updatedAt) console.log(`  更新：${data.policy.updatedAt} by ${data.policy.updatedBy || '-'}`);
+    return;
+  }
+  if (sub === 'set') {
+    requireToken(conn);
+    if (!flags.file) throw new Error('需要 --file <policy.json>');
+    const raw = JSON.parse(fs.readFileSync(flags.file, 'utf8'));
+    const data = await api(conn, 'PUT', '/api/v1/policy', raw.policy ? raw : { policy: raw });
+    if (flags.json) return console.log(JSON.stringify(data, null, 2));
+    console.log(`✓ ${data.message}（启用：${data.policy.autoApprove.enabled ? '是' : '否'}）`);
+    return;
+  }
+  throw new Error(`未知子命令：policy ${sub}（可用 show / set）`);
+}
+
+async function cmdSbom(positionals, flags) {
+  const notFound = positionals[0];
+  if (!notFound) throw new Error('用法：agentdock sbom <kind>/<name>[@version]');
+  const spec = parseSpec(notFound);
+  const conn = resolveConnection(flags);
+  let version = spec.version;
+  if (!version) {
+    const detail = await api(conn, 'GET', `/api/v1/packages/${spec.kind}/${spec.name}`);
+    version = detail.latestVersion || detail.versions?.find((item) => item.status === 'published')?.version;
+    if (!version) throw new Error('该包还没有已发布版本');
+  }
+  const data = await api(
+    conn,
+    'GET',
+    `/api/v1/packages/${spec.kind}/${spec.name}/versions/${encodeURIComponent(version)}/sbom`,
+  );
+  if (flags.json) return console.log(JSON.stringify(data, null, 2));
+  const sbom = data.sbom;
+  console.log(`SBOM ${sbom.schema} — ${spec.kind}/${spec.name}@${sbom.subject.version}`);
+  console.log(`  digest：${sbom.digest}`);
+  console.log(`  contentHash：${sbom.subject.contentHash}`);
+  console.log(`  文件：${sbom.summary.fileCount} 个，${formatBytes(sbom.summary.totalBytes)}；组件：${sbom.summary.componentCount} 个`);
+  for (const [type, count] of Object.entries(sbom.summary.counts || {})) {
+    console.log(`    ${type}: ${count}`);
+  }
+  for (const component of sbom.components) {
+    const extra = component.command ? `  command=${component.command}` : component.url ? `  url=${component.url}` : '';
+    console.log(`  - [${component.type}] ${component.name}${extra}`);
+  }
+  for (const file of sbom.files) {
+    console.log(`    ${file.path}  ${formatBytes(file.bytes)}  sha256:${file.sha256.slice(0, 16)}…`);
+  }
+}
+
 async function cmdKeys(flags) {
   const conn = resolveConnection(flags);
   if (flags.mine) {
@@ -752,9 +819,12 @@ async function cmdSync(positionals, flags) {
       return;
     }
     const label = `${data.package.kind}/${data.package.name}@${data.version.version}`;
-    console.log(`✓ 已从 ${data.source.type} registry 导入 ${label}，等待审核`);
+    const statusNote = data.autoApproved ? '已通过策略自动审批' : '等待审核';
+    console.log(`✓ 已从 ${data.source.type} registry 导入 ${label}，${statusNote}`);
     for (const warning of data.warnings || []) console.log(`  ! ${formatWarning(warning)}`);
-    console.log(`  下一步：agentdock review approve ${data.package.kind}/${data.package.name}@${data.version.version}`);
+    if (!data.autoApproved) {
+      console.log(`  下一步：agentdock review approve ${data.package.kind}/${data.package.name}@${data.version.version}`);
+    }
     return;
   }
 
@@ -969,6 +1039,10 @@ async function main() {
       return cmdRegisterKey(flags);
     case 'transparency':
       return cmdTransparency(positionals, flags);
+    case 'sbom':
+      return cmdSbom(positionals, flags);
+    case 'policy':
+      return cmdPolicy(positionals, flags);
     case 'sync':
       return cmdSync(positionals, flags);
     case 'tokens':

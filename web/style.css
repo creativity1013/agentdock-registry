@@ -391,6 +391,12 @@ select:focus {
   color: var(--amber);
 }
 
+.chip.auto {
+  background: rgba(139, 92, 246, 0.16);
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+}
+
 .chip.published {
   color: var(--green);
 }
