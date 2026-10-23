@@ -4,3 +4,15 @@ node_modules/
 *.tmp
 .DS_Store
 coverage/
+
+# 机密与环境（deploy/.env.example 是占位模板，必须保留）
+.env
+.env.*
+!.env.example
+!deploy/.env.example
+BOOTSTRAP-TOKENS.txt
+nohup.out
+
+# 内部文档（商业与审计材料，不随开源仓库发布）
+docs/LAUNCH-PLAN.md
+docs/OPEN-SOURCE-CHECK.md
