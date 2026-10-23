@@ -61,4 +61,4 @@ First public release. AgentDock is a cross-harness AI capability marketplace and
 - Architecture document covering layering, data model, request lifecycle, security model, and design trade-offs
 - Deployment and usage runbook for new teams
 
-[0.1.0]: https://github.com/dongxinghua86-maker/agentdock-registry/releases/tag/v0.1.0
+[0.1.0]: https://github.com/creativity1013/agentdock-registry/releases/tag/v0.1.0

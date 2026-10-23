@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and help
-    url: https://github.com/dongxinghua86-maker/agentdock-registry/discussions/categories/q-a
+    url: https://github.com/creativity1013/agentdock-registry/discussions/categories/q-a
     about: Ask about installation, deployment, CLI usage, or capability package formats
   - name: Show and tell
-    url: https://github.com/dongxinghua86-maker/agentdock-registry/discussions/categories/show-and-tell
+    url: https://github.com/creativity1013/agentdock-registry/discussions/categories/show-and-tell
     about: Share how you use AgentDock, publish skills, or integrate with your harness

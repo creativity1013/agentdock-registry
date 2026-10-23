@@ -1,6 +1,6 @@
 [English](README.md) | 中文
 
-[![CI](https://github.com/dongxinghua86-maker/agentdock-registry/actions/workflows/ci.yml/badge.svg)](https://github.com/dongxinghua86-maker/agentdock-registry/actions/workflows/ci.yml)
+[![CI](https://github.com/creativity1013/agentdock-registry/actions/workflows/ci.yml/badge.svg)](https://github.com/creativity1013/agentdock-registry/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 # AgentDock
@@ -43,7 +43,7 @@ agentdock verify-signature skill/code-reviewer@0.1.0
 ## 3 分钟 Docker 启动
 
 ```bash
-git clone https://github.com/dongxinghua86-maker/agentdock-registry
+git clone https://github.com/creativity1013/agentdock-registry
 cd agentdock
 docker compose up -d --build
 docker exec agentdock cat /data/BOOTSTRAP-TOKENS.txt   # 首次启动生成的 admin / reviewer / publisher 令牌
