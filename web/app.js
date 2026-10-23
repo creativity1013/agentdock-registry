@@ -185,6 +185,103 @@ function diffNote(scan, onOpenDiff) {
   );
 }
 
+const LLM_RISK_LABEL = { high: '高风险', medium: '中风险', low: '低风险', clean: '未发现风险' };
+
+/** 待审核行上的 AI 研判徽章（有结论才显示） */
+function llmChips(review) {
+  if (!review) return [];
+  if (!review.ok) return [h('span', { class: 'chip', title: review.error || '' }, 'AI · 失败')];
+  const cls = review.risk === 'high' ? 'warn' : review.risk === 'medium' ? 'chip ai-medium' : 'chip';
+  return [h('span', { class: cls, title: review.reasoning || '' }, `AI · ${LLM_RISK_LABEL[review.risk] || review.risk}`)];
+}
+
+/** 展开区顶部的 AI 研判摘要（结论 + 理由 + 模型） */
+function llmReviewSummary(review) {
+  if (!review) return [h('div', { class: 'muted' }, 'AI 研判：暂无（自动研判进行中或未启用，可刷新页面或在详情页手动触发）')];
+  if (!review.ok) return [h('div', { class: 'llm-review risk-error' }, h('div', { class: 'finding-head' }, h('span', { class: 'chip' }, 'AI 研判 · 失败'), h('span', { class: 'muted' }, review.error || '')))];
+  return [
+    h(
+      'div',
+      { class: `llm-review risk-${review.risk}` },
+      h(
+        'div',
+        { class: 'finding-head' },
+        h('span', { class: `chip ${review.risk === 'high' ? 'warn' : ''}` }, `AI 研判 · ${LLM_RISK_LABEL[review.risk] || review.risk}`),
+        review.model ? h('span', { class: 'muted mono' }, review.model) : null,
+        review.at ? h('span', { class: 'muted' }, fmtTime(review.at)) : null,
+      ),
+      ...(review.findings || []).map((finding) =>
+        h(
+          'div',
+          { class: 'finding' },
+          h('div', { class: 'finding-head' },
+            h('span', { class: `sev ${finding.severity}` }, finding.severity),
+            h('span', {}, finding.title),
+          ),
+          finding.detail ? h('div', { class: 'snippet' }, finding.detail) : null,
+        ),
+      ),
+      review.reasoning ? h('div', { class: 'muted' }, review.reasoning) : null,
+      h('div', { class: 'hint' }, '模型结论仅供参考，不参与阻断判定；请人工复核。'),
+    ),
+  ];
+}
+
+/** 模型研判（建议性结论）：展示 + 手动触发（审核者及以上） */
+function llmReviewSection(pkg, selected) {
+  const review = selected.llmReview;
+  const parts = [];
+  if (review) {
+    parts.push(
+      h(
+        'div',
+        { class: `llm-review ${review.ok ? `risk-${review.risk}` : 'risk-error'}` },
+        h(
+          'div',
+          { class: 'finding-head' },
+          h('span', { class: `chip ${review.ok && review.risk === 'high' ? 'warn' : ''}` },
+            review.ok ? `AI 研判 · ${LLM_RISK_LABEL[review.risk] || review.risk}` : 'AI 研判 · 失败'),
+          review.model ? h('span', { class: 'muted mono' }, review.model) : null,
+          review.at ? h('span', { class: 'muted' }, fmtTime(review.at)) : null,
+        ),
+        review.ok
+          ? [
+              ...(review.findings || []).map((finding) =>
+                h(
+                  'div',
+                  { class: 'finding' },
+                  h('div', { class: 'finding-head' },
+                    h('span', { class: `sev ${finding.severity}` }, finding.severity),
+                    h('span', {}, finding.title),
+                  ),
+                  finding.detail ? h('div', { class: 'snippet' }, finding.detail) : null,
+                ),
+              ),
+              review.reasoning ? h('div', { class: 'muted' }, review.reasoning) : null,
+              h('div', { class: 'hint' }, '模型结论仅供参考，不参与阻断判定；请人工复核。'),
+            ]
+          : h('div', { class: 'muted' }, review.error || '研判失败'),
+      ),
+    );
+  }
+  if (can('reviewer')) {
+    parts.push(h('button', {
+      class: 'btn btn-ghost btn-sm',
+      type: 'button',
+      onClick: async () => {
+        try {
+          await api(`/packages/${encodeURIComponent(pkg.kind)}/${encodeURIComponent(pkg.name)}/versions/${encodeURIComponent(selected.version)}/llm-review`, { method: 'POST' });
+          toast('AI 研判完成', 'ok');
+          await openDetail(pkg.kind, pkg.name);
+        } catch (error) {
+          toast(`AI 研判失败：${error.message}`, 'error');
+        }
+      },
+    }, review ? '重新 AI 研判' : 'AI 研判'));
+  }
+  return parts.length ? h('div', { class: 'llm-section' }, ...parts) : null;
+}
+
 async function api(path, { method = 'GET', body } = {}) {
   const headers = {};
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
@@ -1003,6 +1100,7 @@ function paintDetail() {
         h('h3', {}, '安全扫描'),
         diffNote(selected.scan, () => openDiff(pkg, selected.version)),
         h('div', { class: 'findings' }, ...findingsList(selected.scan)),
+        llmReviewSection(pkg, selected),
       )
     : null;
 
@@ -1193,10 +1291,23 @@ function riskBucketOf(item) {
   return 'clean';
 }
 
-function reviewRow(item) {
+const itemKey = (item) => `${item.kind}/${item.name}@${item.version}`;
+
+function reviewRow(item, { selected, onToggle, onDelete } = {}) {
   const note = h('input', { placeholder: '备注（可选）', class: 'mono' });
+  const checkbox = h('input', {
+    type: 'checkbox',
+    checked: Boolean(selected),
+    title: '选中以便批量删除',
+    onChange: () => onToggle(itemKey(item), checkbox.checked),
+  });
   const findings = (item.scan && item.scan.findings) || [];
-  const findingsBox = h('div', { class: 'findings review-findings', hidden: true }, ...findingsList(item.scan));
+  const findingsBox = h(
+    'div',
+    { class: 'findings review-findings', hidden: true },
+    ...llmReviewSummary(item.llmReview),
+    ...findingsList(item.scan),
+  );
   const scanLabel = findings.length ? `扫描 ${findings.length}` : '扫描';
   const scanToggle = h('button', {
     class: `btn btn-ghost btn-sm${findings.length ? ' has-findings' : ''}`,
@@ -1212,6 +1323,7 @@ function reviewRow(item) {
     h(
       'div',
       { class: 'list-row' },
+      checkbox,
       h(
         'div',
         { class: 'grow' },
@@ -1221,6 +1333,7 @@ function reviewRow(item) {
       ),
       h('span', { class: `chip ${item.kind}` }, KIND_LABEL[item.kind] || item.kind),
       ...scanChips({ summary: item.scanSummary || { high: 0, medium: 0, low: 0, total: 0 } }),
+      ...llmChips(item.llmReview),
       note,
       scanToggle,
       h('button', {
@@ -1228,6 +1341,26 @@ function reviewRow(item) {
         type: 'button',
         onClick: () => openDiff({ kind: item.kind, name: item.name }, item.version),
       }, '差异'),
+      h('button', {
+        class: 'btn btn-danger btn-sm',
+        type: 'button',
+        title: '删除该待审核版本（不产生拒绝记录，直接移除）',
+        onClick: async () => {
+          if (!confirm(`确定删除待审核版本 ${item.kind}/${item.name}@${item.version} ？此操作不可恢复。`)) return;
+          try {
+            const result = await api('/review/delete', { method: 'POST', body: { entries: [{ kind: item.kind, name: item.name, version: item.version }] } });
+            if (result.ok) {
+              toast(`已删除 ${item.name}@${item.version}`, 'ok');
+            } else {
+              toast(`删除失败：${result.failed?.[0]?.error || '未知错误'}`, 'error');
+            }
+            render();
+            refreshBadge();
+          } catch (error) {
+            toast(`操作失败：${error.message}`, 'error');
+          }
+        },
+      }, '删除'),
       h('button', {
         class: 'btn btn-primary btn-sm',
         type: 'button',
@@ -1298,6 +1431,62 @@ async function renderReview(main) {
 
   const filtered = kindItems.filter((item) => active === 'all' || riskBucketOf(item) === active);
 
+  // 批量删除：选择状态跨刷新保留（仅限当前还在队列里的条目）
+  state.reviewSelected = state.reviewSelected || new Set();
+  const currentKeys = new Set(items.map(itemKey));
+  for (const key of [...state.reviewSelected]) {
+    if (!currentKeys.has(key)) state.reviewSelected.delete(key);
+  }
+  const selectedCount = h('span', { class: 'muted' });
+  const batchDelete = h('button', {
+    class: 'btn btn-danger btn-sm',
+    type: 'button',
+    disabled: true,
+    onClick: async () => {
+      const entries = items
+        .filter((item) => state.reviewSelected.has(itemKey(item)))
+        .map((item) => ({ kind: item.kind, name: item.name, version: item.version }));
+      if (entries.length === 0) return;
+      if (!confirm(`确定批量删除选中的 ${entries.length} 个待审核版本？此操作不可恢复。`)) return;
+      batchDelete.disabled = true;
+      try {
+        const result = await api('/review/delete', { method: 'POST', body: { entries } });
+        state.reviewSelected.clear();
+        toast(
+          result.failed.length ? `已删除 ${result.deleted} 个，${result.failed.length} 个失败：${result.failed[0].error}` : `已删除 ${result.deleted} 个版本`,
+          result.failed.length ? 'error' : 'ok',
+        );
+        render();
+        refreshBadge();
+      } catch (error) {
+        toast(`操作失败：${error.message}`, 'error');
+        batchDelete.disabled = false;
+      }
+    },
+  }, '删除选中');
+  const updateSelectedCount = () => {
+    selectedCount.textContent = `已选 ${state.reviewSelected.size}`;
+    batchDelete.disabled = state.reviewSelected.size === 0;
+  };
+  const selectAll = h('input', {
+    type: 'checkbox',
+    title: '全选 / 全不选（当前筛选结果）',
+    checked: filtered.length > 0 && filtered.every((item) => state.reviewSelected.has(itemKey(item))),
+    onChange: () => {
+      for (const item of filtered) {
+        if (selectAll.checked) state.reviewSelected.add(itemKey(item));
+        else state.reviewSelected.delete(itemKey(item));
+      }
+      render();
+    },
+  });
+  const toggleSelected = (key, checked) => {
+    if (checked) state.reviewSelected.add(key);
+    else state.reviewSelected.delete(key);
+    updateSelectedCount();
+  };
+  updateSelectedCount();
+
   const groups = REVIEW_BUCKETS.map((bucket) => {
     const bucketItems = filtered.filter((item) => riskBucketOf(item) === bucket.id);
     if (bucketItems.length === 0) return null;
@@ -1312,14 +1501,24 @@ async function renderReview(main) {
       },
         h('span', { class: `chip risk-${bucket.id}` }, `${bucket.title} ${bucketItems.length}`),
         h('span', { class: 'muted' }, bucket.hint)),
-      h('div', { class: 'list' }, ...bucketItems.map(reviewRow)));
+      h('div', { class: 'list' }, ...bucketItems.map((item) => reviewRow(item, {
+        selected: state.reviewSelected.has(itemKey(item)),
+        onToggle: toggleSelected,
+      }))));
   }).filter(Boolean);
+
+  const batchBar = h('div', { class: 'toolbar' },
+    h('label', { class: 'check' }, selectAll, '全选'),
+    selectedCount,
+    batchDelete,
+    h('span', { class: 'hint' }, '删除会直接移除待审核版本（含文件），不产生拒绝记录；操作留审计 review.delete'));
 
   main.replaceChildren(
     h('div', { class: 'section-title' },
       h('h2', {}, '待审核'),
       h('span', { class: 'muted' }, `共 ${data.total} 个版本 · 当前显示 ${filtered.length} 个 · 按扫描结果分类`)),
     tabs,
+    filtered.length ? batchBar : null,
     groups.length ? h('div', { class: 'review-groups' }, ...groups) : h('div', { class: 'empty' }, items.length ? '该分类下没有版本' : '没有待审核的版本'),
   );
 }
@@ -1442,6 +1641,96 @@ async function renderPolicy(main) {
         h('li', {}, '策略对之后发布的版本生效，已上架版本不受影响。'),
         h('li', {}, '开启后低风险内部包免排队；外部导入、非受信发布者仍走人工审核。'),
         h('li', {}, '策略修改会写入审计日志（action=policy.update）；CLI 等价命令：agentdock policy show / policy set --file policy.json。'))),
+    ...(can('admin') ? [await llmSettingsPanel()] : []),
+  );
+}
+
+/** AI 研判配置面板（admin）：url/model/key/超时，存 data/llm.json，保存即生效 */
+async function llmSettingsPanel() {
+  let data = {};
+  try {
+    data = await api('/llm');
+  } catch (error) {
+    return h('div', { class: 'panel' }, h('h3', {}, 'AI 研判'), h('p', { class: 'hint' }, `读取配置失败：${error.message}`));
+  }
+  const url = h('input', { value: data.url || '', placeholder: 'https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1（Ollama）' });
+  const model = h('input', { value: data.model || '', placeholder: 'deepseek-chat / qwen2.5:14b / gpt-4o-mini …' });
+  const key = h('input', { type: 'password', placeholder: data.keySet ? '已设置（留空 = 不修改）' : 'sk-…（本地 Ollama 可留空）' });
+  const timeout = h('input', { type: 'number', min: '1000', max: '300000', step: '1000', value: String(data.timeoutMs ?? 60000) });
+  const statusChip = h('span', { class: `chip ${data.enabled ? 'auto' : ''}` }, data.enabled ? '已启用' : '未启用');
+  const testResult = h('span', { class: 'hint' });
+
+  // 流程：填写 → 测试连接 → 通过后「保存配置」才可点（清空配置关闭功能时除外）
+  let testedOk = false;
+  const formValues = () => ({ url: url.value, model: model.value, key: key.value, timeoutMs: Number(timeout.value) });
+  const updateSaveState = () => {
+    const disabling = !url.value.trim() && !model.value.trim();
+    saveLlm.disabled = !(disabling || testedOk);
+    saveLlm.title = saveLlm.disabled ? '请先点击「测试连接」，通过后才能保存' : '';
+  };
+  for (const input of [url, model, key, timeout]) {
+    input.addEventListener('input', () => {
+      testedOk = false;
+      testResult.textContent = '';
+      updateSaveState();
+    });
+  }
+
+  const testBtn = h('button', {
+    class: 'btn btn-ghost',
+    type: 'button',
+    onClick: async () => {
+      testBtn.disabled = true;
+      testResult.textContent = '测试中…';
+      try {
+        const result = await api('/llm/test', { method: 'POST', body: formValues() });
+        testedOk = true;
+        testResult.textContent = `✔ 连接成功 · ${result.latencyMs}ms · 模型回复：${result.reply || '（空）'}`;
+        toast('连接测试通过，可以保存', 'ok');
+      } catch (error) {
+        testedOk = false;
+        testResult.textContent = `✘ ${error.message}`;
+        toast('连接测试未通过', 'error');
+      }
+      testBtn.disabled = false;
+      updateSaveState();
+    },
+  }, '测试连接');
+
+  const saveLlm = h('button', {
+    class: 'btn btn-primary',
+    type: 'button',
+    disabled: true,
+    onClick: async () => {
+      saveLlm.disabled = true;
+      try {
+        const result = await api('/llm', { method: 'PUT', body: formValues() });
+        toast(result.message || '已保存', 'ok');
+        render();
+      } catch (error) {
+        toast(`保存失败：${error.message}`, 'error');
+        saveLlm.disabled = false;
+      }
+    },
+  }, '保存配置');
+  updateSaveState();
+
+  const row = (label, control, hint) =>
+    h('div', { class: 'form-row' },
+      h('span', { class: 'form-label' }, label),
+      h('div', {}, control, hint ? h('p', { class: 'hint' }, hint) : null));
+
+  return h('div', { class: 'panel' },
+    h('h3', {}, 'AI 研判（模型二次研判） ', statusChip),
+    h('p', { class: 'hint' },
+      '配置后，进入人工审核的版本会自动把内容送大模型做第二次安全研判（建议性结论，不参与阻断判定，不阻塞发布）；版本详情页也可手动触发。'),
+    row('接口地址（OpenAI 兼容）', url, '自动补 /chat/completions；来源：' + (data.source === 'file' ? 'llm.json（页面已自定义）' : data.source === 'env' ? '环境变量' : '默认（未配置）')),
+    row('模型', model, null),
+    row('API Key', key, '仅写入不回显；页面留空表示沿用已保存的 Key'),
+    row('超时（毫秒）', timeout, '1000 ~ 300000'),
+    h('div', { class: 'actions' }, testBtn, testResult),
+    h('div', { class: 'actions' }, saveLlm),
+    h('p', { class: 'hint' }, '流程：填写 → 「测试连接」通过 → 「保存配置」生效（清空地址与模型可关闭功能，无需测试）。修改写入审计日志（action=llm.config / llm.test）。'),
   );
 }
 

@@ -15,6 +15,7 @@ import { describeBundle } from './validate.mjs';
 import { analyzeInput } from './pipeline.mjs';
 import { scanChanges, scanVerdict } from './scan.mjs';
 import { diffLines } from './diff.mjs';
+import { llmEnabled, reviewWithLLM } from './llmreview.mjs';
 import { ensureDataLayout } from './config.mjs';
 import { badRequest, conflict, notFound, unprocessable } from './errors.mjs';
 import {
@@ -441,6 +442,13 @@ export function createStore(config, { audit, users, transparency, notifier } = {
       submittedBy: actor,
       autoApproved,
     });
+
+    // 模型研判：仅对「有命中（低/中/高危）且进入人工审核」的 pending 版本自动触发，
+    // 干净版本不送模型（省成本、无信息量）；fire-and-forget，
+    // 绝不阻塞发布响应，也绝不因研判失败而影响发布结果
+    if (llmEnabled(config) && !autoApproved && (report.scan.summary?.total ?? 0) > 0) {
+      runLlmReview(bundle.kind, bundle.name, bundle.version, { actor: 'system', role: 'auto', ip }).catch(() => {});
+    }
     return { package: summarizePackage(pkgKey, pkg), version: versionDoc, autoApproved };
   }
 
@@ -820,6 +828,86 @@ export function createStore(config, { audit, users, transparency, notifier } = {
     };
   }
 
+  /**
+   * 模型研判：把版本内容送给配置的 LLM 做第二次安全研判，结论写入
+   * versionDoc.llmReview。**纯建议性**——不改状态、不参与阻断判定；
+   * 失败（未配置/超时/输出不合法）也照常落盘为 ok:false 的记录，便于排查。
+   */
+  async function runLlmReview(kind, name, version, { actor = 'system', role = '', ip = '' } = {}) {
+    if (!llmEnabled(config)) {
+      throw unprocessable('模型研判未启用（需配置 AGENTDOCK_LLM_URL 与 AGENTDOCK_LLM_MODEL）');
+    }
+    const versionDoc = getVersion(kind, name, version);
+    if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+    const bundle = bundleFromVersion(kind, name, versionDoc);
+    const result = await reviewWithLLM(config, {
+      kind,
+      name,
+      version: versionDoc.version,
+      description: versionDoc.description,
+      scan: versionDoc.scan,
+      files: bundle.files,
+      diffBase: versionDoc.scan?.diff?.base ?? null,
+    });
+    versionDoc.llmReview = result.ok
+      ? { ok: true, ...result.verdict }
+      : { ok: false, error: result.error, at: nowIso(), model: config.llm.model };
+    persistVersion(kind, name, versionDoc);
+    audit?.append({
+      actor,
+      role,
+      action: 'llm.review',
+      target: `${kind}/${name}@${versionDoc.version}`,
+      meta: { risk: result.ok ? result.verdict.risk : null, findings: result.ok ? result.verdict.findings.length : 0, ok: result.ok },
+      ip,
+    });
+    return versionDoc.llmReview;
+  }
+
+  /**
+   * 删除待审核版本（支持批量）：仅 pending 可删，磁盘文件一并清除；
+   * 已发布/已拒绝版本不受影响。逐条独立处理，失败的条目不影响其余。
+   */
+  function deletePendingVersions(entries, { actor = 'unknown', role = '', ip = '' } = {}) {
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw badRequest('entries 不能为空（形如 [{kind, name, version}, …]）');
+    }
+    const results = [];
+    for (const entry of entries.slice(0, 100)) {
+      const { kind, name, version } = entry || {};
+      try {
+        if (!KINDS.includes(kind) || !isValidName(name) || typeof version !== 'string') {
+          throw badRequest(`条目不合法：${JSON.stringify(entry)}`);
+        }
+        const pkg = requirePackage(kind, name);
+        const versionDoc = pkg.versions[version];
+        if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+        if (versionDoc.status !== 'pending') {
+          throw conflict(`仅待审核版本可删除（${kind}/${name}@${version} 当前：${VERSION_STATUS_LABEL[versionDoc.status]}）`);
+        }
+        fs.rmSync(versionDir(kind, name, version), { recursive: true, force: true });
+        delete pkg.versions[version];
+        persistPackage(keyOf(kind, name), pkg);
+        audit?.append({
+          actor,
+          role,
+          action: 'review.delete',
+          target: `${kind}/${name}@${version}`,
+          meta: { tenant: pkg.tenant || 'default', batch: entries.length > 1 },
+          ip,
+        });
+        results.push({ kind, name, version, ok: true });
+      } catch (error) {
+        results.push({ kind, name, version, ok: false, error: error.message });
+      }
+    }
+    return {
+      deleted: results.filter((item) => item.ok).length,
+      failed: results.filter((item) => !item.ok),
+      results,
+    };
+  }
+
   /** 审核队列（最早提交的在前） */
   function reviewQueue(tenant = '') {
     const items = [];
@@ -840,6 +928,7 @@ export function createStore(config, { audit, users, transparency, notifier } = {
           totalBytes: versionDoc.totalBytes,
           scan: versionDoc.scan,
           scanSummary: versionDoc.scan?.summary ?? null,
+          llmReview: versionDoc.llmReview ?? null,
           manifest: versionDoc.manifest,
           manifestDescription: describeBundle(versionDoc.manifest),
         });
@@ -917,6 +1006,8 @@ export function createStore(config, { audit, users, transparency, notifier } = {
     listPackages,
     packageDetail,
     reviewQueue,
+    runLlmReview,
+    deletePendingVersions,
     recordInstall,
     signingKeyInfo,
     verifySignature,

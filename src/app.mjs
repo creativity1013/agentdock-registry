@@ -16,6 +16,7 @@ import { qualityOf } from './quality.mjs';
 import { createTransparencyLog } from './transparency.mjs';
 import { buildMarketplaceCatalog, describeAdapters, importFromGitHub, importFromMcpRegistry, RegistryError } from './registry.mjs';
 import { defaultPolicy, evaluateAutoApproval, loadPolicy, normalizePolicy, savePolicy, setPolicyFor, PolicyError } from './policy.mjs';
+import { applyLlmSettings, loadLlmSettings, normalizeLlmSettings, saveLlmSettings, testLlmConnection } from './llmreview.mjs';
 import { createSessionManager } from './session.mjs';
 import { NOTIFY_EVENTS, NOTIFY_FORMATS, createNotifier, loadNotify } from './notify.mjs';
 import { analyzeInput } from './pipeline.mjs';
@@ -58,6 +59,9 @@ export function createApp(config = loadConfig()) {
   const store = createStore(config, { audit, users, transparency, notifier });
   const policyState = loadPolicy(config);
   store.setPolicies(policyState.policies);
+  // 模型研判：页面保存的 data/llm.json 优先于环境变量（apply 会即时生效到共享 config.llm）
+  const llmState = { source: loadLlmSettings(config) ? 'file' : config.llm.url ? 'env' : 'default' };
+  if (llmState.source === 'file') applyLlmSettings(config, loadLlmSettings(config));
   const rateLimit = config.security?.rateLimit || { enabled: false };
   const apiLimiter = createRateLimiter({ windowMs: rateLimit.windowMs || 60_000, max: rateLimit.max || 300 });
   const loginLimiter = createRateLimiter({ windowMs: rateLimit.windowMs || 60_000, max: rateLimit.loginMax || 20 });
@@ -650,6 +654,21 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { ok: true, sbom });
     }
 
+    // 模型研判：手动触发一次 LLM 安全研判（建议性结论，存入 version.llmReview）
+    const llmMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)\/llm-review$/);
+    if (llmMatch && method === 'POST') {
+      requireRole('reviewer');
+      const [, kind, name, version] = llmMatch;
+      const versionDoc = store.getVersion(kind, name, version, tenant);
+      if (!versionDoc) throw notFound(`版本不存在：${kind}/${name}@${version}`);
+      const llmReview = await store.runLlmReview(kind, name, versionDoc.version, {
+        actor: auth.name,
+        role: auth.role,
+        ip,
+      });
+      return sendJson(res, 200, { ok: true, llmReview });
+    }
+
     // 下载完整能力包（CLI 安装用）
     const bundleMatch = pathname.match(/^\/api\/v1\/packages\/([a-z]+)\/([A-Za-z0-9._-]+)\/versions\/([^/]+)\/bundle$/);
     if (bundleMatch && method === 'GET') {
@@ -789,6 +808,15 @@ export function createApp(config = loadConfig()) {
       return sendJson(res, 200, { ok: true, version: publicVersion(versionDoc) });
     }
 
+    // 删除待审核版本（单个/批量）：entries = [{kind, name, version}, …]
+    if (route === 'review/delete' && method === 'POST') {
+      requireRole('reviewer');
+      const body = await readBody(req);
+      const entries = Array.isArray(body?.entries) ? body.entries : [body];
+      const result = store.deletePendingVersions(entries, { actor: auth.name, role: auth.role, ip });
+      return sendJson(res, 200, { ok: result.failed.length === 0, ...result });
+    }
+
     // 自动审批策略（读取 reviewer；更新 admin）
     if (route === 'policy' && method === 'GET') {
       requireRole('reviewer');
@@ -823,6 +851,61 @@ export function createApp(config = loadConfig()) {
         ip,
       });
       return sendJson(res, 200, { ok: true, tenant: ctx.tenant, policy: next, message: '策略已更新' });
+    }
+
+    // 模型研判配置（admin）：页面可视化编辑，存 data/llm.json，保存即生效
+    if (route === 'llm' && method === 'GET') {
+      requireRole('admin');
+      return sendJson(res, 200, {
+        ok: true,
+        enabled: Boolean(config.llm.enabled),
+        url: config.llm.url,
+        model: config.llm.model,
+        timeoutMs: config.llm.timeoutMs,
+        keySet: Boolean(config.llm.key),
+        source: llmState.source,
+        file: config.files.llm,
+      });
+    }
+
+    if (route === 'llm' && method === 'PUT') {
+      requireRole('admin');
+      const body = await readBody(req);
+      const next = saveLlmSettings(config, normalizeLlmSettings(body));
+      llmState.source = 'file';
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'llm.config',
+        target: 'llm.json',
+        meta: { enabled: next.enabled, url: next.url, model: next.model, timeoutMs: next.timeoutMs },
+        ip,
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        enabled: next.enabled,
+        url: next.url,
+        model: next.model,
+        timeoutMs: next.timeoutMs,
+        keySet: Boolean(next.key),
+        message: next.enabled ? '模型研判配置已保存并启用' : '配置已保存（url 与 model 齐全后启用）',
+      });
+    }
+
+    // 连通性测试（admin）：用表单当前值真实调一次模型；只测不存
+    if (route === 'llm/test' && method === 'POST') {
+      requireRole('admin');
+      const body = await readBody(req);
+      const result = await testLlmConnection(config, body);
+      audit.append({
+        actor: auth.name,
+        role: auth.role,
+        action: 'llm.test',
+        target: 'llm.json',
+        meta: { ok: result.ok, url: body?.url || '', model: body?.model || '', latencyMs: result.latencyMs ?? null },
+        ip,
+      });
+      return sendJson(res, result.ok ? 200 : 502, { ...result });
     }
 
     // 事件通知（admin）
@@ -1079,6 +1162,7 @@ function publicVersion(versionDoc) {
     files: versionDoc.files,
     manifest: versionDoc.manifest,
     scan: versionDoc.scan,
+    llmReview: versionDoc.llmReview ?? null,
     submittedAt: versionDoc.submittedAt,
     submittedBy: versionDoc.submittedBy,
     review: versionDoc.review,

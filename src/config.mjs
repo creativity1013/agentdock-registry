@@ -84,6 +84,15 @@ export function loadConfig(env = process.env, overrides = {}) {
   if (!Number.isFinite(rateLoginMax) || rateLoginMax <= 0) {
     throw new Error(`AGENTDOCK_RATE_LIMIT_LOGIN_MAX 不合法：${env.AGENTDOCK_RATE_LIMIT_LOGIN_MAX}`);
   }
+  // 模型研判（LLM review）：OpenAI 兼容 chat/completions 端点；url+model 都配置才启用
+  const llmUrl = String(overrides.llm?.url ?? env.AGENTDOCK_LLM_URL ?? '').trim();
+  const llmKey = String(overrides.llm?.key ?? env.AGENTDOCK_LLM_KEY ?? '');
+  const llmModel = String(overrides.llm?.model ?? env.AGENTDOCK_LLM_MODEL ?? '').trim();
+  const llmTimeoutMs = Number(overrides.llm?.timeoutMs ?? env.AGENTDOCK_LLM_TIMEOUT_MS ?? 60_000);
+  if (!Number.isFinite(llmTimeoutMs) || llmTimeoutMs <= 0) {
+    throw new Error(`AGENTDOCK_LLM_TIMEOUT_MS 不合法：${env.AGENTDOCK_LLM_TIMEOUT_MS}`);
+  }
+
   const security = {
     rateLimit: {
       enabled: rateLimitEnabled,
@@ -131,6 +140,13 @@ export function loadConfig(env = process.env, overrides = {}) {
       maxBytes: auditMaxBytes,
       keep: auditKeep,
     },
+    llm: {
+      url: llmUrl,
+      key: llmKey,
+      model: llmModel,
+      timeoutMs: llmTimeoutMs,
+      enabled: Boolean(llmUrl && llmModel),
+    },
     files: {
       db: path.join(dataDir, 'db.json'),
       sqlite: path.join(dataDir, 'agentdock.sqlite'),
@@ -143,6 +159,7 @@ export function loadConfig(env = process.env, overrides = {}) {
       transparency: path.join(dataDir, 'transparency.log'),
       sessions: path.join(dataDir, 'sessions.json'),
       policy: path.join(dataDir, 'policy.json'),
+      llm: path.join(dataDir, 'llm.json'),
       sessionSecret: path.join(dataDir, 'session-secret.json'),
       notify: path.join(dataDir, 'notify.json'),
     },

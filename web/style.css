@@ -1278,3 +1278,39 @@ pre.code {
   margin: 2px 0 2px 14px;
   color: var(--text-dim);
 }
+
+.llm-section {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llm-review {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-dim);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.llm-review.risk-high {
+  border-left-color: var(--red);
+}
+
+.llm-review.risk-medium {
+  border-left-color: var(--amber);
+}
+
+.llm-review.risk-clean,
+.llm-review.risk-low {
+  border-left-color: #6bcB77;
+}
+
+.chip.ai-medium {
+  color: var(--amber);
+  background: rgba(255, 184, 77, 0.12);
+}
