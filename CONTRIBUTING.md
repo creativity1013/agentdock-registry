@@ -7,10 +7,8 @@ Thanks for your interest in contributing! AgentDock is a self-hosted AI capabili
 - **Node.js >= 20.11** (24 LTS recommended; the optional SQLite backend requires Node 24+ for `node:sqlite`)
 - No `npm install` needed — the project has zero third-party dependencies and no lockfile
 
-<!-- TODO: 替换为真实仓库地址 -->
-
 ```bash
-git clone https://github.com/<owner>/agentdock.git
+git clone https://github.com/dongxinghua86-maker/agentdock-registry.git
 cd agentdock
 npm start          # starts the server on http://127.0.0.1:7788
 ```

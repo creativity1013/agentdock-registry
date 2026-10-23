@@ -1,7 +1,6 @@
 English | [中文](README.zh-CN.md)
 
-<!-- TODO: replace `YOUR_USER/agentdock` with the real repo slug after the repository is public -->
-[![CI](https://github.com/YOUR_USER/agentdock/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USER/agentdock/actions/workflows/ci.yml)
+[![CI](https://github.com/dongxinghua86-maker/agentdock-registry/actions/workflows/ci.yml/badge.svg)](https://github.com/dongxinghua86-maker/agentdock-registry/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 # AgentDock
@@ -44,7 +43,7 @@ agentdock verify-signature skill/code-reviewer@0.1.0
 ## Up and running in 3 minutes (Docker)
 
 ```bash
-git clone https://github.com/YOUR_USER/agentdock   # TODO: replace with the real repo URL
+git clone https://github.com/dongxinghua86-maker/agentdock-registry
 cd agentdock
 docker compose up -d --build
 docker exec agentdock cat /data/BOOTSTRAP-TOKENS.txt   # admin / reviewer / publisher tokens, created on first start

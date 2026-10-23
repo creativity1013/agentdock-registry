@@ -592,7 +592,7 @@ async function renderMarket(main) {
     toolbar,
     h('div', { class: 'section-title' }, h('h2', {}, '能力市场'), h('span', { class: 'muted' }, `共 ${list.total} 个`)),
     grid,
-    pager,
+    ...(list.totalPages > 1 ? [pager] : []),
   );
 }
 
@@ -815,7 +815,7 @@ function paintDiff(pkg, data) {
   body.replaceChildren(
     head,
     stats,
-    data.truncated ? h('p', { class: 'hint' }, '文件较多，仅展示前 100 个有变化的文件。') : null,
+    ...(data.truncated ? [h('p', { class: 'hint' }, '文件较多，仅展示前 100 个有变化的文件。')] : []),
     h('div', { class: 'diff-body' }, ...files),
   );
 }
@@ -1106,7 +1106,7 @@ function paintDetail() {
 
   const actions = h('div', { class: 'actions' }, ...actionControls(pkg, selected));
 
-  body.replaceChildren(head, sub, kv, versionList, files, scanPanel, actions);
+  body.replaceChildren(head, sub, kv, versionList, ...(files ? [files] : []), ...(scanPanel ? [scanPanel] : []), actions);
 }
 
 function actionControls(pkg, selected) {
@@ -1518,7 +1518,7 @@ async function renderReview(main) {
       h('h2', {}, '待审核'),
       h('span', { class: 'muted' }, `共 ${data.total} 个版本 · 当前显示 ${filtered.length} 个 · 按扫描结果分类`)),
     tabs,
-    filtered.length ? batchBar : null,
+    ...(filtered.length ? [batchBar] : []),
     groups.length ? h('div', { class: 'review-groups' }, ...groups) : h('div', { class: 'empty' }, items.length ? '该分类下没有版本' : '没有待审核的版本'),
   );
 }
@@ -1557,7 +1557,7 @@ async function renderAudit(main) {
     h('div', { class: 'section-title' },
       h('h2', {}, '审计日志'),
       h('span', { class: 'muted' }, `最近 ${data.items.length} / 共 ${data.total} 条${data.tenant && data.tenant !== '*' ? ` · 租户 ${data.tenant}` : ''}`)),
-    admin ? h('div', { class: 'panel' }, h('div', { class: 'actions' }, tenantInput, apply)) : null,
+    ...(admin ? [h('div', { class: 'panel' }, h('div', { class: 'actions' }, tenantInput, apply))] : []),
     rows.length ? h('div', { class: 'list' }, ...rows) : h('div', { class: 'empty' }, '暂无审计记录'),
   );
 }
