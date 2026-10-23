@@ -36,7 +36,9 @@ jobs:
 
       - name: 校验示例能力包
         run: |
+          # examples/bundles 是导入格式示例（非能力包目录），跳过
           for pkg in examples/*/; do
+            [ "$(basename "$pkg")" = "bundles" ] && continue
             node cli/agentdock.mjs verify "$pkg"
           done
 
